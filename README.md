@@ -4,7 +4,7 @@ A GNOME Shell extension that lets you toggle multiple OpenVPN profiles directly
 from the top panel.  It manages OpenVPN CLI processes **without NetworkManager**
 and supports hardware tokens via PKCS#11.
 
-Supports **GNOME Shell 43** and **44**.
+Supports **GNOME Shell 42 – 46**.
 
 ---
 
@@ -56,7 +56,7 @@ VPN profiles live in a separate directory (default `~/.config/openvpn`):
 
 | Package | Purpose |
 |---|---|
-| `gnome-shell` ≥ 43 | Shell extension runtime |
+| `gnome-shell` ≥ 42 | Shell extension runtime |
 | `openvpn` | OpenVPN CLI |
 | `sudo` | Run OpenVPN as root |
 | `expect` | Wrapper / interactive automation scripts |
@@ -109,7 +109,24 @@ glib-compile-schemas "$DEST/schemas/"
 chmod +x "$DEST/scripts/askpass.exp" "$DEST/scripts/askpin.exp"
 ```
 
-### 4 – Enable the extension
+### 4 – Restart GNOME Shell (X11 only)
+
+On an **X11** session, GNOME Shell must be restarted before it can discover
+the newly installed extension:
+
+1. Press **Alt + F2** to open the *Run a Command* dialog.
+2. Type `r` and press **Enter**.
+
+GNOME Shell will reload without closing your open windows.
+
+> **Wayland note** – On a Wayland session `Alt + F2 → r` is not available.
+> Log out and log back in instead, or run the extension from a nested GNOME
+> session for testing:
+> ```bash
+> dbus-run-session -- gnome-shell --nested --wayland
+> ```
+
+### 5 – Enable the extension
 
 ```bash
 gnome-extensions enable gnome-openvpn-toggle@zeecka
@@ -117,7 +134,7 @@ gnome-extensions enable gnome-openvpn-toggle@zeecka
 
 Or use **GNOME Extensions** app / **Extensions Manager**.
 
-### 5 – Configure sudoers (recommended)
+### 6 – Configure sudoers (recommended)
 
 To avoid being prompted for a sudo password on every connection, add a
 sudoers rule for openvpn:
@@ -137,7 +154,7 @@ sudo visudo -f /etc/sudoers.d/openvpn-toggle
 If you keep sudo authentication active, a GNOME pinentry dialog will appear
 automatically to collect your password (handled by `askpass.exp`).
 
-### 6 – Add VPN profiles
+### 7 – Add VPN profiles
 
 Place `.ovpn` files in `~/.config/openvpn/` (or the directory you configured
 in the preferences):

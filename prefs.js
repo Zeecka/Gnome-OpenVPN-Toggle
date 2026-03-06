@@ -6,26 +6,25 @@
  *   - The directory containing .ovpn profile files
  *   - The path to the PKCS#11 provider shared library
  *
- * Compatible with GNOME Shell 43 and 44.
+ * Compatible with GNOME Shell 42–46.
  */
 
-'use strict';
+import {ExtensionPreferences} from 'resource:///org/gnome/shell/extensions/prefs.js';
 
-const { Gtk, Gio, GLib, GObject } = imports.gi;
-const ExtensionUtils = imports.misc.extensionUtils;
+import Gtk    from 'gi://Gtk';
+import Gio    from 'gi://Gio';
+import GLib   from 'gi://GLib';
 
-function init() { // eslint-disable-line no-unused-vars
-}
+export default class OpenVPNPreferences extends ExtensionPreferences {
 
-/**
- * buildPrefsWidget
- *
- * Returns the root GTK4 widget for the extension preferences page.
- * Called by GNOME Shell when the user opens the preferences dialog.
- */
-function buildPrefsWidget() { // eslint-disable-line no-unused-vars
-    let settings = ExtensionUtils.getSettings(
-        'org.gnome.shell.extensions.gnome-openvpn-toggle');
+    /**
+     * getPreferencesWidget
+     *
+     * Returns the root GTK4 widget for the extension preferences page.
+     * Called by GNOME Shell when the user opens the preferences dialog.
+     */
+    getPreferencesWidget() {
+        let settings = this.getSettings();
 
     // ── Root container ────────────────────────────────────────────────────
     let root = new Gtk.Box({
@@ -137,7 +136,8 @@ function buildPrefsWidget() { // eslint-disable-line no-unused-vars
     root.append(pkcsBox);
 
     return root;
-}
+    } // getPreferencesWidget
+} // OpenVPNPreferences
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

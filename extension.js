@@ -6,7 +6,7 @@
  * Does NOT rely on NetworkManager; it manages OpenVPN CLI processes
  * directly using GLib/Gio subprocess APIs.
  *
- * Supports GNOME Shell 43 and 44 (traditional imports, not ESM).
+ * Supports GNOME Shell 42–46 (ES module format required by GNOME 45+).
  *
  * Architecture overview
  * ---------------------
@@ -43,16 +43,17 @@
  * exits for any reason) the state returns to DISCONNECTED.
  */
 
-'use strict';
+import GLib    from 'gi://GLib';
+import Gio     from 'gi://Gio';
+import GObject from 'gi://GObject';
+import St      from 'gi://St';
+import Clutter from 'gi://Clutter';
 
-const { GLib, Gio, GObject, St, Clutter } = imports.gi;
-const Main            = imports.ui.main;
-const PanelMenu       = imports.ui.panelMenu;
-const PopupMenu       = imports.ui.popupMenu;
-const ExtensionUtils  = imports.misc.extensionUtils;
+import * as Main      from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-/** Reference to this extension's metadata / directory */
-const ME = ExtensionUtils.getCurrentExtension();
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -165,8 +166,13 @@ function _stateLabel(state, ip = null) {
 var OpenVpnIndicator = GObject.registerClass(
 class OpenVpnIndicator extends PanelMenu.Button {
 
-    _init(settings) {
+    _init(extension, settings) {
         super._init(0.0, 'OpenVPN Toggle');
+
+        /** Extension path – used to locate helper scripts */
+        this._extPath = extension.path;
+        /** Callback to open the preferences dialog */
+        this._openPrefs = () => extension.openPreferences();
 
         this._settings          = settings;
         /** name → profile data object */
@@ -205,7 +211,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(reloadItem);
 
         let prefsItem = new PopupMenu.PopupMenuItem('⚙  Preferences');
-        prefsItem.connect('activate', () => ExtensionUtils.openPrefs());
+        prefsItem.connect('activate', () => this._openPrefs());
         this.menu.addMenuItem(prefsItem);
 
         // Load profiles now and re-scan each time the menu opens
@@ -337,7 +343,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
     _connectVpn(profile) {
         this._updateProfileState(profile, VPN_STATE.CONNECTING, null);
 
-        let extDir    = ME.dir.get_path();
+        let extDir    = this._extPath;
         let askpass   = GLib.build_filenamev([extDir, 'scripts', 'askpass.exp']);
         let askpin    = GLib.build_filenamev([extDir, 'scripts', 'askpin.exp']);
         let pkcs11    = this._settings.get_string('pkcs11-provider');
@@ -374,7 +380,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
             // Start monitoring stdout for status messages and process exit
             this._monitorProcess(profile);
         } catch (e) {
-            logError(e, '[OpenVPN Toggle] Failed to start OpenVPN');
+            console.error('[OpenVPN Toggle] Failed to start OpenVPN', e);
             this._updateProfileState(profile, VPN_STATE.DISCONNECTED, null);
             this._activeProcess     = null;
             this._activeProfileName = null;
@@ -438,7 +444,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
                         [line] = s.read_line_finish_utf8(res);
                     } catch (e) {
                         if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
-                            logError(e, '[OpenVPN Toggle] Process read error');
+                            console.error('[OpenVPN Toggle] Process read error', e);
                         return;
                     }
 
@@ -582,27 +588,22 @@ class OpenVpnIndicator extends PanelMenu.Button {
 
 // ── Extension lifecycle ──────────────────────────────────────────────────────
 
-let _indicator = null;
-
-/** Called once when the extension is first loaded */
-function init() { // eslint-disable-line no-unused-vars
-}
-
 /**
- * Enable the extension: create the panel indicator and add it to the bar.
- * Settings are loaded from GSettings (schema compiled from schemas/).
+ * The exported Extension class is instantiated once by GNOME Shell.
+ * enable() / disable() are called each time the extension is toggled.
  */
-function enable() { // eslint-disable-line no-unused-vars
-    let settings = ExtensionUtils.getSettings(
-        'org.gnome.shell.extensions.gnome-openvpn-toggle');
-    _indicator = new OpenVpnIndicator(settings);
-    Main.panel.addToStatusArea(ME.metadata.uuid, _indicator);
-}
+export default class OpenVPNExtension extends Extension {
 
-/** Disable the extension: destroy the indicator and release all resources */
-function disable() { // eslint-disable-line no-unused-vars
-    if (_indicator !== null) {
-        _indicator.destroy();
-        _indicator = null;
+    enable() {
+        let settings = this.getSettings();
+        this._indicator = new OpenVpnIndicator(this, settings);
+        Main.panel.addToStatusArea(this.uuid, this._indicator);
+    }
+
+    disable() {
+        if (this._indicator !== null) {
+            this._indicator.destroy();
+            this._indicator = null;
+        }
     }
 }
