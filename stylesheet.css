@@ -1,0 +1,44 @@
+/* stylesheet.css
+ *
+ * OpenVPN Toggle – Extension stylesheet
+ *
+ * Colour conventions
+ * ------------------
+ *   vpn-disconnected  → grey
+ *   vpn-connecting    → amber
+ *   vpn-connected     → green
+ */
+
+/* ── Menu header ─────────────────────────────────────────────────────────── */
+
+.vpn-menu-header {
+    color: alpha(white, 0.55);
+    font-size: 0.8em;
+}
+
+/* ── Profile row ─────────────────────────────────────────────────────────── */
+
+.vpn-profile-name {
+    font-weight: bold;
+}
+
+/* ── Status label ────────────────────────────────────────────────────────── */
+
+.vpn-status {
+    font-size: 0.82em;
+    padding: 0 10px;
+    min-width: 6em;
+    text-align: right;
+}
+
+.vpn-disconnected {
+    color: alpha(white, 0.45);
+}
+
+.vpn-connecting {
+    color: #f0a000;
+}
+
+.vpn-connected {
+    color: #4caf50;
+}
