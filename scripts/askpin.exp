@@ -1,0 +1,202 @@
+#!/usr/bin/expect -f
+#
+# askpin.exp – OpenVPN PKCS#11 wrapper script
+# ============================================
+#
+# PURPOSE
+# -------
+# This script is the entry point called by the GNOME extension when the user
+# enables a VPN profile.  It:
+#
+#   1. Spawns the OpenVPN process under sudo.
+#   2. Allows sudo to obtain the sudo password via the SUDO_ASKPASS helper
+#      (askpass.exp), which the extension sets in the environment.
+#   3. Monitors OpenVPN stdout/stderr for a PKCS#11 PIN prompt.
+#   4. When a PIN prompt is detected, opens a pinentry-gnome3 dialog to
+#      collect the PIN from the user and sends it back to OpenVPN.
+#   5. Forwards all OpenVPN output to its own stdout so the GNOME extension
+#      can detect "Initialization Sequence Completed" and update the UI.
+#
+# MECHANISM
+# ---------
+# expect's `spawn` is used to launch `sudo -A openvpn …`.  The `-A` flag
+# tells sudo to call SUDO_ASKPASS instead of prompting on the terminal.
+# The main `expect` loop then listens for patterns in OpenVPN output.
+# When a PIN prompt is detected the script temporarily spawns a second
+# process (pinentry-gnome3), retrieves the PIN via the Assuan protocol,
+# restores the spawn_id back to the OpenVPN process, and sends the PIN.
+#
+# USAGE
+#   expect askpin.exp <ovpn_file> [pkcs11_provider]
+#
+# ENVIRONMENT
+#   SUDO_ASKPASS  Must point to askpass.exp so sudo can request the password
+#   DISPLAY / WAYLAND_DISPLAY / XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS
+#                 Must be set so pinentry-gnome3 can open a GUI window
+#
+# DEPENDENCIES
+#   expect, openvpn, sudo, pinentry-gnome3
+
+set ovpn_file      [lindex $argv 0]
+set pkcs11_provider [lindex $argv 1]
+
+if {$ovpn_file eq ""} {
+    puts stderr "Usage: askpin.exp <ovpn_file> \[pkcs11_provider\]"
+    exit 1
+}
+
+if {$pkcs11_provider eq ""} {
+    set pkcs11_provider "/usr/lib/libIDPrimePKCS11.so"
+}
+
+# ── Helper: retrieve a secret from pinentry-gnome3 ──────────────────────────
+#
+# get_secret title description prompt_label
+#
+#   Opens a pinentry-gnome3 dialog with the given title, description and
+#   prompt label.  Returns the entered string, or "" if the user cancelled.
+#
+# Note: spawn_id is saved before spawning pinentry and restored afterwards
+#       so the outer expect loop continues to work on the OpenVPN process.
+
+proc get_secret {title description prompt_label} {
+    global spawn_id
+
+    # Escape % which is special in the Assuan protocol
+    set esc_title [string map {% %25 \n " "} $title]
+    set esc_desc  [string map {% %25 \n " "} $description]
+
+    # Save the current spawn ID (the OpenVPN process)
+    set openvpn_spawn_id $spawn_id
+
+    # Spawn a fresh pinentry-gnome3 instance
+    spawn pinentry-gnome3
+
+    set result ""
+
+    expect {
+        "OK" { }
+        timeout {
+            # pinentry did not start; restore spawn ID and return empty
+            set spawn_id $openvpn_spawn_id
+            return ""
+        }
+        eof {
+            set spawn_id $openvpn_spawn_id
+            return ""
+        }
+    }
+
+    send "SETTITLE $esc_title\r"
+    expect { "OK" { } -re {^ERR} { } }
+
+    send "SETDESC $esc_desc\r"
+    expect { "OK" { } -re {^ERR} { } }
+
+    send "SETPROMPT $prompt_label\r"
+    expect { "OK" { } -re {^ERR} { } }
+
+    send "GETPIN\r"
+    expect {
+        -re {^D (.*)\r} {
+            set result $expect_out(1,string)
+            expect "OK"
+        }
+        -re {^ERR} {
+            # User cancelled
+            set result ""
+        }
+        timeout {
+            set result ""
+        }
+    }
+
+    send "BYE\r"
+    expect eof
+
+    # Restore spawn ID to the OpenVPN process
+    set spawn_id $openvpn_spawn_id
+
+    return $result
+}
+
+# ── Spawn OpenVPN ────────────────────────────────────────────────────────────
+#
+# sudo -A   : use SUDO_ASKPASS to obtain the sudo password (no tty needed)
+# --config  : path to the .ovpn profile
+# --pkcs11-providers : shared library for hardware-token authentication
+# --script-security 2 : allow calling external scripts (needed by some configs)
+
+if {[file exists $pkcs11_provider]} {
+    spawn sudo -A openvpn \
+        --config $ovpn_file \
+        --pkcs11-providers $pkcs11_provider \
+        --script-security 2
+} else {
+    # Fall back to a plain OpenVPN invocation if no PKCS#11 provider is given
+    spawn sudo -A openvpn \
+        --config $ovpn_file \
+        --script-security 2
+}
+
+# Give OpenVPN up to 2 minutes to establish the connection
+set timeout 120
+
+# ── Main interaction loop ────────────────────────────────────────────────────
+
+expect {
+    # ── PKCS#11 / token PIN prompt ──────────────────────────────────────────
+    # OpenVPN (via the PKCS#11 library) prints a prompt such as:
+    #   "Enter PIN for token '<label>':"
+    -re -nocase {(enter pin|pkcs11.*pin|token.*pin|pin for token)[^\r\n]*} {
+        set raw_prompt $expect_out(0,string)
+
+        set pin [get_secret \
+            "PKCS#11 Authentication" \
+            "OpenVPN requires your hardware token PIN.\n$raw_prompt" \
+            "PIN:"]
+
+        if {$pin eq ""} {
+            puts stderr "askpin: PIN entry cancelled by user"
+            # Send Ctrl-C to abort OpenVPN cleanly
+            send "\003"
+            exit 1
+        }
+
+        send "$pin\r"
+        exp_continue
+    }
+
+    # ── Successful connection ────────────────────────────────────────────────
+    # OpenVPN prints this when the tunnel is fully up.
+    # Forward it to stdout so the GNOME extension can detect it.
+    "Initialization Sequence Completed" {
+        puts "Initialization Sequence Completed"
+        flush stdout
+        exp_continue
+    }
+
+    # ── Authentication / TLS errors ─────────────────────────────────────────
+    -re -nocase {(auth.failed|authentication failed|tls error|bad.*password|cannot.*resolve)} {
+        puts stderr "askpin: VPN connection failed – $expect_out(0,string)"
+        exit 1
+    }
+
+    # ── Normal log lines – forward to stdout ─────────────────────────────────
+    -re {[^\r\n]+} {
+        puts $expect_out(0,string)
+        flush stdout
+        exp_continue
+    }
+
+    # ── Process ended (SIGTERM from the extension, or an error) ─────────────
+    eof {
+        exit 0
+    }
+
+    # ── Timeout waiting for connection ───────────────────────────────────────
+    timeout {
+        puts stderr "askpin: timeout waiting for VPN connection"
+        exit 1
+    }
+}

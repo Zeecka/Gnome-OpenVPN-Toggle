@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.gnome-openvpn-toggle"
+          path="/org/gnome/shell/extensions/gnome-openvpn-toggle/">
+
+    <key name="profiles-dir" type="s">
+      <default>'~/.config/openvpn'</default>
+      <summary>Profiles Directory</summary>
+      <description>
+        Directory containing .ovpn profile files.
+        A leading ~ is expanded to the user's home directory at runtime.
+      </description>
+    </key>
+
+    <key name="pkcs11-provider" type="s">
+      <default>'/usr/lib/libIDPrimePKCS11.so'</default>
+      <summary>PKCS#11 Provider Library</summary>
+      <description>
+        Absolute path to the PKCS#11 shared library used for hardware-token
+        (smart card) authentication.  Example: /usr/lib/libIDPrimePKCS11.so
+      </description>
+    </key>
+
+  </schema>
+</schemalist>

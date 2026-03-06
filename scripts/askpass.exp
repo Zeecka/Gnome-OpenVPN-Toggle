@@ -1,0 +1,92 @@
+#!/usr/bin/expect -f
+#
+# askpass.exp – SUDO_ASKPASS helper script
+# =========================================
+#
+# PURPOSE
+# -------
+# This script is called by sudo when the environment variable SUDO_ASKPASS
+# points to it.  sudo passes the password prompt text as the first command-
+# line argument and expects the password to be printed to stdout.
+#
+# MECHANISM
+# ---------
+# The script uses the Assuan/pinentry protocol to talk to pinentry-gnome3,
+# which displays a native GNOME dialog to collect the password from the user.
+#
+# Steps:
+#   1. sudo sets SUDO_ASKPASS and calls this script with the prompt string.
+#   2. We spawn pinentry-gnome3.
+#   3. We send SETDESC / SETPROMPT / GETPIN commands over its stdin.
+#   4. pinentry-gnome3 returns the entered text on a "D <value>" line.
+#   5. We print the value to stdout so sudo can consume it.
+#
+# USAGE
+#   SUDO_ASKPASS=/path/to/askpass.exp sudo -A <command>
+#
+# DEPENDENCIES
+#   expect, pinentry-gnome3
+
+set prompt [lindex $argv 0]
+if {$prompt eq ""} {
+    set prompt "Enter sudo password:"
+}
+
+# Escape special characters that have meaning in the Assuan protocol
+set prompt [string map {% %25 \n " "} $prompt]
+
+# Spawn pinentry-gnome3 and interact via the Assuan protocol
+spawn pinentry-gnome3
+
+expect {
+    "OK" { }
+    timeout {
+        puts stderr "askpass: timeout waiting for pinentry to start"
+        exit 1
+    }
+    eof {
+        puts stderr "askpass: pinentry-gnome3 not found or exited immediately"
+        exit 1
+    }
+}
+
+# Set the description text shown in the dialog window
+send "SETDESC $prompt\r"
+expect {
+    "OK"    { }
+    -re "ERR.*" { send "BYE\r"; expect eof; exit 1 }
+}
+
+# Set the label next to the entry field
+send "SETPROMPT Password:\r"
+expect {
+    "OK"    { }
+    -re "ERR.*" { send "BYE\r"; expect eof; exit 1 }
+}
+
+# Request the password; pinentry blocks until the user confirms or cancels
+send "GETPIN\r"
+
+expect {
+    # "D <value>" line contains the entered password
+    -re {^D (.*)\r} {
+        set password $expect_out(1,string)
+        expect "OK"
+        send "BYE\r"
+        expect eof
+        # Print the password to stdout so sudo can consume it
+        puts -nonewline $password
+        exit 0
+    }
+    # User cancelled or an error occurred
+    -re {^ERR} {
+        send "BYE\r"
+        expect eof
+        exit 1
+    }
+    timeout {
+        send "BYE\r"
+        expect eof
+        exit 1
+    }
+}
