@@ -2,7 +2,7 @@
 
 A GNOME Shell extension that lets you toggle multiple OpenVPN profiles directly
 from the top panel.  It manages OpenVPN CLI processes **without NetworkManager**
-and supports hardware tokens via PKCS#11.
+and relies on options already declared in each `.ovpn` file.
 
 Supports **GNOME Shell 42 – 46**.
 
@@ -18,10 +18,9 @@ Supports **GNOME Shell 42 – 46**.
   disconnects the active one.
 - **Auto-scan** – `.ovpn` files in the configured directory are detected
   automatically; the list refreshes each time the menu opens.
-- **Hardware-token (PKCS#11) support** – PIN is requested via a native GNOME
-  pinentry dialog.
-- **Configurable** – profiles directory and PKCS#11 library path can be changed
-  in the extension preferences.
+- **PIN prompt handling** – token/auth PIN dialogs are handled via native GNOME
+  pinentry when OpenVPN prompts for them.
+- **Configurable** – profiles directory can be changed in extension preferences.
 
 ---
 
@@ -178,7 +177,6 @@ gnome-extensions prefs gnome-openvpn-toggle@zeecka
 | Setting | Default | Description |
 |---|---|---|
 | **Profiles directory** | `~/.config/openvpn` | Directory scanned for `.ovpn` files |
-| **PKCS#11 provider** | `/usr/lib/libIDPrimePKCS11.so` | Shared library for hardware-token auth |
 
 ---
 
@@ -196,12 +194,12 @@ OpenVPN is started.  When `sudo -A` needs a password it calls this script
 4. Receives the password on a `D <value>` line.
 5. Prints the password to stdout so sudo can use it.
 
-### PKCS#11 PIN (`scripts/askpin.exp`)
+### Token / auth PIN (`scripts/askpin.exp`)
 
 `askpin.exp` is the main entry point called by the extension.  It:
 
-1. Receives the `.ovpn` file path and PKCS#11 provider path as arguments.
-2. Spawns `sudo -A openvpn --config … --pkcs11-providers …`.
+1. Receives the `.ovpn` file path as argument.
+2. Spawns `sudo -A openvpn --config …`.
 3. Monitors OpenVPN stdout for PIN prompts using `expect` pattern matching.
 4. When a PIN prompt is detected, temporarily spawns a `pinentry-gnome3`
    dialog to collect the PIN (saving and restoring `spawn_id`).

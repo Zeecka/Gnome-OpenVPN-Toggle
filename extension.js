@@ -19,7 +19,7 @@
  * ----------------------
  * When the user toggles a profile ON the extension runs:
  *
- *   expect <extdir>/scripts/askpin.exp  <ovpn_file>  <pkcs11_provider>
+ *   expect <extdir>/scripts/askpin.exp <ovpn_file>
  *
  * with the environment variable SUDO_ASKPASS pointing to:
  *
@@ -27,12 +27,12 @@
  *
  * askpin.exp in turn spawns:
  *
- *   sudo -A openvpn --config <ovpn_file> --pkcs11-providers <provider>
+ *   sudo -A openvpn --config <ovpn_file>
  *
  * sudo calls SUDO_ASKPASS (askpass.exp) to obtain the sudo password via a
  * pinentry-gnome3 GUI dialog.  askpin.exp also monitors OpenVPN stdout for
- * PKCS#11 PIN prompts and feeds the PIN retrieved from a second
- * pinentry-gnome3 dialog back to OpenVPN.
+ * PIN prompts and feeds the PIN retrieved from a second pinentry-gnome3
+ * dialog back to OpenVPN.
  *
  * How process monitoring works
  * ----------------------------
@@ -332,7 +332,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
      *
      * The extension runs:
      *
-     *   expect <extdir>/scripts/askpin.exp <ovpn_file> <pkcs11_provider>
+    *   expect <extdir>/scripts/askpin.exp <ovpn_file>
      *
      * with SUDO_ASKPASS pointing to askpass.exp.  askpin.exp is responsible
      * for spawning the actual OpenVPN process and handling authentication
@@ -346,7 +346,6 @@ class OpenVpnIndicator extends PanelMenu.Button {
         let extDir    = this._extPath;
         let askpass   = GLib.build_filenamev([extDir, 'scripts', 'askpass.exp']);
         let askpin    = GLib.build_filenamev([extDir, 'scripts', 'askpin.exp']);
-        let pkcs11    = this._settings.get_string('pkcs11-provider');
 
         // Make sure the helper scripts are executable
         try {
@@ -371,9 +370,9 @@ class OpenVpnIndicator extends PanelMenu.Button {
         }
 
         try {
-            // Launch: expect askpin.exp <ovpn_path> <pkcs11_provider>
+            // Launch: expect askpin.exp <ovpn_path>
             this._activeProcess = launcher.spawnv(
-                ['expect', askpin, profile.path, pkcs11]);
+                ['expect', askpin, profile.path]);
             this._activeProfileName = profile.name;
             this._cancellable       = new Gio.Cancellable();
 

@@ -12,14 +12,5 @@
       </description>
     </key>
 
-    <key name="pkcs11-provider" type="s">
-      <default>'/usr/lib/libIDPrimePKCS11.so'</default>
-      <summary>PKCS#11 Provider Library</summary>
-      <description>
-        Absolute path to the PKCS#11 shared library used for hardware-token
-        (smart card) authentication.  Example: /usr/lib/libIDPrimePKCS11.so
-      </description>
-    </key>
-
   </schema>
 </schemalist>

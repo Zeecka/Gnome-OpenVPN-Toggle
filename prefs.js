@@ -4,7 +4,6 @@
  * =====================================
  * Provides a GTK4 widget for configuring:
  *   - The directory containing .ovpn profile files
- *   - The path to the PKCS#11 provider shared library
  *
  * Compatible with GNOME Shell 42–46.
  */
@@ -83,57 +82,6 @@ export default class OpenVPNPreferences extends ExtensionPreferences {
     dirBox.append(dirEntry);
     dirBox.append(dirBtn);
     root.append(dirBox);
-
-    root.append(new Gtk.Separator({ orientation: Gtk.Orientation.HORIZONTAL }));
-
-    // ── Section: PKCS#11 provider ─────────────────────────────────────────
-    root.append(_makeLabel('PKCS#11 Provider Library', true));
-    root.append(_makeLabel(
-        'Absolute path to the PKCS#11 shared library for hardware-token ' +
-        'authentication.\nExample: /usr/lib/libIDPrimePKCS11.so'));
-
-    let pkcsBox   = new Gtk.Box({ orientation: Gtk.Orientation.HORIZONTAL,
-        spacing: 8 });
-    let pkcsEntry = new Gtk.Entry({
-        text    : settings.get_string('pkcs11-provider'),
-        hexpand : true,
-        tooltip_text: 'Absolute path to the .so file',
-    });
-    let pkcsBtn = new Gtk.Button({ label: 'Browse…' });
-
-    pkcsEntry.connect('changed', () =>
-        settings.set_string('pkcs11-provider', pkcsEntry.get_text()));
-
-    pkcsBtn.connect('clicked', () => {
-        let dialog = new Gtk.FileChooserDialog({
-            title        : 'Select PKCS#11 Provider Library',
-            action       : Gtk.FileChooserAction.OPEN,
-            transient_for: root.get_root(),
-            modal        : true,
-        });
-        dialog.add_button('Cancel', Gtk.ResponseType.CANCEL);
-        dialog.add_button('Select', Gtk.ResponseType.ACCEPT);
-
-        // Filter to .so files
-        let filter = new Gtk.FileFilter();
-        filter.set_name('Shared libraries (*.so*)');
-        filter.add_pattern('*.so*');
-        dialog.add_filter(filter);
-
-        dialog.connect('response', (dlg, response) => {
-            if (response === Gtk.ResponseType.ACCEPT) {
-                let path = dlg.get_file().get_path();
-                pkcsEntry.set_text(path);
-                settings.set_string('pkcs11-provider', path);
-            }
-            dlg.destroy();
-        });
-        dialog.show();
-    });
-
-    pkcsBox.append(pkcsEntry);
-    pkcsBox.append(pkcsBtn);
-    root.append(pkcsBox);
 
     return root;
     } // getPreferencesWidget
