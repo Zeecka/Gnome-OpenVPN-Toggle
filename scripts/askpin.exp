@@ -1,7 +1,4 @@
 #!/usr/bin/expect -f
-#
-# askpin.exp – OpenVPN expect wrapper script
-# ===========================================
 
 set ovpn_file [lindex $argv 0]
 set rules_file [lindex $argv 1]
@@ -11,6 +8,12 @@ if {$ovpn_file eq ""} {
     puts stderr "Usage: askpin.exp <ovpn_file> ?rules_file? ?debug_log?"
     exit 1
 }
+
+puts "askpin: script-version=2026-03-08f"
+puts "askpin: config=$ovpn_file rules_file=[expr {$rules_file eq "" ? "(none)" : $rules_file}]"
+flush stdout
+
+set openvpn_pid ""
 
 if {$debug_log ne ""} {
     if {[catch {log_file -noappend $debug_log} log_err]} {
@@ -27,11 +30,7 @@ proc unescape_rule_field {value} {
 }
 
 proc load_rules {path} {
-    if {$path eq ""} {
-        return {}
-    }
-
-    if {![file exists $path]} {
+    if {$path eq "" || ![file exists $path]} {
         return {}
     }
 
@@ -50,203 +49,296 @@ proc load_rules {path} {
             continue
         }
 
-        set prompt [unescape_rule_field [lindex $fields 0]]
-        set type [unescape_rule_field [lindex $fields 1]]
+        set expected [unescape_rule_field [lindex $fields 0]]
+        set input_type [unescape_rule_field [lindex $fields 1]]
         set value [unescape_rule_field [lindex $fields 2]]
 
-        if {$prompt eq ""} {
-            continue
-        }
-        if {$type ne "static" && $type ne "prompt"} {
+        if {$expected eq ""} {
             continue
         }
 
-        lappend rules [list $prompt $type $value]
+        if {$input_type ne "static" && $input_type ne "prompt"} {
+            continue
+        }
+
+        lappend rules [list $expected $input_type $value]
     }
 
     return $rules
 }
 
 proc literal_to_regex {text} {
-    set escaped $text
-    regsub -all {[][(){}.*+?^$\\|]} $escaped {\\&} escaped
+    set trimmed [string trim $text]
+    if {$trimmed eq ""} {
+        return ""
+    }
+
+    set escaped ""
+    set in_space 0
+
+    foreach ch [split $trimmed ""] {
+        if {[regexp {\s} $ch]} {
+            if {!$in_space} {
+                append escaped {\s+}
+                set in_space 1
+            }
+            continue
+        }
+
+        set in_space 0
+        if {[regexp {[][(){}.*+?^$\\|]} $ch]} {
+            append escaped "\\$ch"
+        } else {
+            append escaped $ch
+        }
+    }
+
+    append escaped {\s*}
     return $escaped
 }
 
-proc get_secret {title description prompt_label} {
-    global spawn_id
-
-    set esc_title [string map {% %25 \n " "} $title]
-    set esc_desc  [string map {% %25 \n " "} $description]
-    set openvpn_spawn_id $spawn_id
-
-    spawn pinentry-gnome3
-
-    set result ""
-
+proc dialog_next_line {} {
     expect {
-        "OK" { }
+        -re {([^\r\n]*)\r\n} {
+            return [string trim $expect_out(1,string)]
+        }
         timeout {
-            set spawn_id $openvpn_spawn_id
-            return ""
+            return "__TIMEOUT__"
         }
         eof {
-            set spawn_id $openvpn_spawn_id
-            return ""
+            return "__EOF__"
         }
     }
+}
 
-    send "SETTITLE $esc_title\r"
-    expect { "OK" { } -re {^ERR} { } }
+proc dialog_wait_ok {} {
+    while {1} {
+        set line [dialog_next_line]
 
-    send "SETDESC $esc_desc\r"
-    expect { "OK" { } -re {^ERR} { } }
+        if {$line eq "__TIMEOUT__" || $line eq "__EOF__"} {
+            return 0
+        }
 
-    send "SETPROMPT $prompt_label\r"
-    expect { "OK" { } -re {^ERR} { } }
+        if {$line eq ""} {
+            continue
+        }
+
+        if {[string match "OK*" $line]} {
+            return 1
+        }
+
+        if {[string match "ERR*" $line]} {
+            return 0
+        }
+    }
+}
+
+proc dialog_send_expect_ok {command} {
+    send "$command\r"
+    return [dialog_wait_ok]
+}
+
+proc dialog_get_input {} {
+    set value ""
 
     send "GETPIN\r"
-    expect {
-        -re {^D (.*)\r} {
-            set result $expect_out(1,string)
-            expect "OK"
+
+    while {1} {
+        set line [dialog_next_line]
+
+        if {$line eq "__TIMEOUT__" || $line eq "__EOF__"} {
+            return ""
         }
-        -re {^ERR} {
-            set result ""
+
+        if {$line eq ""} {
+            continue
         }
-        timeout {
-            set result ""
+
+        if {[string match "ERR*" $line]} {
+            return ""
+        }
+
+        if {[string match "D *" $line]} {
+            set value [string range $line 2 end]
+            continue
+        }
+
+        if {[string match "OK*" $line]} {
+            return $value
         }
     }
+}
 
-    send "BYE\r"
-    expect eof
+proc request_value {description prompt_label} {
+    global spawn_id timeout
+
+    set esc_title [string map {% %25 \n " "} "OpenVPN Input"]
+    set esc_desc [string map {% %25 \n " "} $description]
+    set openvpn_spawn_id $spawn_id
+    set old_timeout $timeout
+
+    set timeout 30
+    spawn pinentry-gnome3
+
+    if {![dialog_wait_ok]} {
+        set spawn_id $openvpn_spawn_id
+        set timeout $old_timeout
+        return ""
+    }
+
+    if {![dialog_send_expect_ok "SETTITLE $esc_title"]} {
+        set spawn_id $openvpn_spawn_id
+        set timeout $old_timeout
+        return ""
+    }
+
+    if {![dialog_send_expect_ok "SETDESC $esc_desc"]} {
+        set spawn_id $openvpn_spawn_id
+        set timeout $old_timeout
+        return ""
+    }
+
+    if {![dialog_send_expect_ok "SETPROMPT $prompt_label"]} {
+        set spawn_id $openvpn_spawn_id
+        set timeout $old_timeout
+        return ""
+    }
+
+    set result [dialog_get_input]
+
+    catch {
+        send "BYE\r"
+        expect eof
+    }
 
     set spawn_id $openvpn_spawn_id
+    set timeout $old_timeout
 
     return $result
 }
 
-set input_rules [load_rules $rules_file]
-set use_custom_rules [expr {[llength $input_rules] > 0}]
-set current_rule_index 0
-set current_prompt_re "__NO_MORE_RULES__THIS_WILL_NOT_MATCH__"
+proc terminate_openvpn_tree {} {
+    global openvpn_pid
 
-if {$use_custom_rules} {
+    if {$openvpn_pid eq ""} {
+        return
+    }
+
+    catch {exec kill -TERM -- -$openvpn_pid}
+    catch {exec kill -TERM $openvpn_pid}
+    catch {exec pkill -TERM -P $openvpn_pid}
+
+    after 150
+
+    catch {exec kill -KILL -- -$openvpn_pid}
+    catch {exec kill -KILL $openvpn_pid}
+    catch {exec pkill -KILL -P $openvpn_pid}
+}
+
+proc handle_stop_signal {signal_name} {
+    puts "askpin: received $signal_name; terminating openvpn subprocess"
+    flush stdout
+    terminate_openvpn_tree
+    exit 0
+}
+
+set input_rules [load_rules $rules_file]
+set use_rules [expr {[llength $input_rules] > 0}]
+set current_rule_index 0
+set current_expected_re "__NO_MATCH__"
+
+if {$use_rules} {
     set first_rule [lindex $input_rules 0]
-    set current_prompt_re [literal_to_regex [lindex $first_rule 0]]
+    set current_expected_re [literal_to_regex [lindex $first_rule 0]]
+    puts "askpin: loaded [llength $input_rules] configured input rule(s)"
+    puts "askpin: waiting for input #1 regex={$current_expected_re}"
+    flush stdout
+} else {
+    puts "askpin: no configured input rules; running passthrough"
+    flush stdout
 }
 
 spawn sudo -A openvpn \
     --config $ovpn_file \
     --script-security 2
 
-set timeout 120
+set openvpn_pid [exp_pid]
+
+trap {handle_stop_signal SIGTERM} SIGTERM
+trap {handle_stop_signal SIGINT} SIGINT
+trap {handle_stop_signal SIGHUP} SIGHUP
+
+set timeout -1
 
 expect {
-    -re $current_prompt_re {
-        if {!$use_custom_rules || $current_rule_index >= [llength $input_rules]} {
+    -nocase -re $current_expected_re {
+        if {!$use_rules || $current_rule_index >= [llength $input_rules]} {
             exp_continue
         }
 
-        set raw_prompt $expect_out(0,string)
+        set observed [string trim $expect_out(0,string)]
         set rule [lindex $input_rules $current_rule_index]
-        set prompt_text [lindex $rule 0]
+        set expected_text [lindex $rule 0]
         set input_type [lindex $rule 1]
         set input_value [lindex $rule 2]
 
-        set answer ""
+        set response ""
         if {$input_type eq "static"} {
-            set answer $input_value
-        } elseif {$input_type eq "prompt"} {
-            set answer [get_secret \
-                "OpenVPN Authentication" \
-                "OpenVPN requires your input.\n$raw_prompt" \
+            puts "askpin: matched input #[expr {$current_rule_index + 1}] type=static expected={$expected_text}"
+            flush stdout
+            set response $input_value
+        } else {
+            puts "askpin: matched input #[expr {$current_rule_index + 1}] type=prompt expected={$expected_text}"
+            flush stdout
+
+            set response [request_value \
+                "OpenVPN requires an input.\n$observed" \
                 $input_value]
 
-            if {$answer eq ""} {
-                puts stderr "askpin: input prompt cancelled by user for expected text: $prompt_text"
+            if {$response eq ""} {
+                puts stderr "askpin: prompt input cancelled/unavailable for expected text: $expected_text"
                 send "\003"
+                terminate_openvpn_tree
                 exit 1
             }
-        } else {
-            puts stderr "askpin: invalid input type '$input_type'"
-            send "\003"
-            exit 1
         }
 
-        send "$answer\r"
+        send "$response\r"
 
         incr current_rule_index
         if {$current_rule_index < [llength $input_rules]} {
             set next_rule [lindex $input_rules $current_rule_index]
-            set current_prompt_re [literal_to_regex [lindex $next_rule 0]]
+            set current_expected_re [literal_to_regex [lindex $next_rule 0]]
+            puts "askpin: waiting for input #[expr {$current_rule_index + 1}] regex={$current_expected_re}"
         } else {
-            set current_prompt_re "__NO_MORE_RULES__THIS_WILL_NOT_MATCH__"
+            set current_expected_re "__NO_MATCH__"
+            puts "askpin: all configured input rules processed"
         }
+        flush stdout
 
         exp_continue
     }
 
-    -re -nocase {(enter pin|token.*pin|pin for token)[^\r\n]*} {
-        if {$use_custom_rules} {
-            puts $expect_out(0,string)
-            flush stdout
-            exp_continue
-        }
-
-        set raw_prompt $expect_out(0,string)
-
-        set pin [get_secret \
-            "OpenVPN Authentication" \
-            "OpenVPN requires your authentication PIN.\n$raw_prompt" \
-            "PIN:"]
-
-        if {$pin eq ""} {
-            puts stderr "askpin: PIN entry cancelled by user"
-            send "\003"
-            exit 1
-        }
-
-        send "$pin\r"
-        exp_continue
-    }
-
-    "Initialization Sequence Completed" {
+    -re {(^|\r\n)Initialization Sequence Completed(\r\n|$)} {
         puts "Initialization Sequence Completed"
         flush stdout
         exp_continue
     }
 
-    -re -nocase {(auth.failed|authentication failed|tls error|bad.*password|cannot.*resolve)} {
-        puts stderr "askpin: VPN connection failed – $expect_out(0,string)"
-        exit 1
-    }
-
-    -re {[^\r\n]+} {
+    -re {[^\n]+} {
         puts $expect_out(0,string)
         flush stdout
         exp_continue
     }
 
     eof {
-        if {$use_custom_rules && $current_rule_index < [llength $input_rules]} {
+        if {$use_rules && $current_rule_index < [llength $input_rules]} {
             set missing_rule [lindex $input_rules $current_rule_index]
             set expected_text [lindex $missing_rule 0]
             puts stderr "askpin: expected input not found before openvpn exited: $expected_text"
             exit 1
         }
+        set openvpn_pid ""
         exit 0
-    }
-
-    timeout {
-        if {$use_custom_rules && $current_rule_index < [llength $input_rules]} {
-            set missing_rule [lindex $input_rules $current_rule_index]
-            set expected_text [lindex $missing_rule 0]
-            puts stderr "askpin: expected input not found (timeout): $expected_text"
-        } else {
-            puts stderr "askpin: timeout waiting for VPN connection"
-        }
-        exit 1
     }
 }

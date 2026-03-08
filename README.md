@@ -164,7 +164,7 @@ gnome-extensions prefs gnome-openvpn-toggle@zeecka
 Interactive inputs are configured only through the preferences GUI (no RAW JSON
 editor). For each profile, add ordered entries with:
 
-- `input`: literal text expected from OpenVPN prompt output.
+- `input`: prompt text expected from OpenVPN output (matching is case-insensitive and whitespace-tolerant).
 - `type=static`: send `value` directly to OpenVPN.
 - `type=prompt`: open pinentry-gnome3 and use `value` as prompt label.
 

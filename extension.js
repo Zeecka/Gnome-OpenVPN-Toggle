@@ -72,6 +72,10 @@ const IP_POLL_INTERVAL_MS = 15000;
 
 /** Max time (ms) allowed to establish VPN before considering it stuck */
 const CONNECT_TIMEOUT_MS = 120000;
+/** Max time (ms) after init-complete to detect a real VPN interface/IP */
+const VPN_READY_TIMEOUT_MS = 20000;
+/** Poll interval (ms) while waiting for VPN interface/IP after init-complete */
+const VPN_READY_POLL_INTERVAL_MS = 1000;
 
 // ── VpnProfileMenuItem ───────────────────────────────────────────────────────
 
@@ -228,12 +232,20 @@ class OpenVpnIndicator extends PanelMenu.Button {
         this._ipTimer           = null;
         /** GLib timeout source ID for connection watchdog, or null */
         this._connectTimer      = null;
+        /** GLib timeout source ID for VPN interface/IP readiness checks */
+        this._vpnReadyTimer     = null;
+        /** Number of readiness polls attempted for current connection */
+        this._vpnReadyChecks    = 0;
         /** Temporary rules file path used by askpin.exp for active profile */
         this._activeRulesFile   = null;
         /** Last askpin error text observed from merged process output */
         this._lastAskpinError   = null;
         /** Current profile debug log path (.ovpn.log), or null */
         this._activeDebugLogPath = null;
+        /** Baseline VPN iface/IP records captured before connecting */
+        this._connectBaselineVpnRecords = [];
+        /** Fast lookup set for baseline VPN iface/IP tuples */
+        this._connectBaselineVpnRecordSet = new Set();
 
         // ── Panel icon ────────────────────────────────────────────────────
         this.add_child(new St.Icon({
@@ -392,6 +404,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
      * @param {object} profile - Profile to connect
      */
     _connectVpn(profile) {
+        this._captureConnectBaseline(profile);
         this._updateProfileState(profile, VPN_STATE.CONNECTING, null);
 
         if (this._isDebugEnabled())
@@ -448,6 +461,10 @@ class OpenVpnIndicator extends PanelMenu.Button {
 
             this._appendDebugLog(profile,
                 `[${new Date().toISOString()}] [extension] Spawned askpin wrapper for ${profile.path}`);
+            this._appendDebugLog(profile,
+                `[${new Date().toISOString()}] [extension] askpin script=${askpin} askpass script=${askpass}`);
+            this._appendDebugLog(profile,
+                `[${new Date().toISOString()}] [extension] interactive rules file=${rulesFile ?? '(none)'}`);
 
             this._startConnectTimeout(profile);
 
@@ -459,6 +476,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
             this._activeProcess     = null;
             this._activeProfileName = null;
             this._activeDebugLogPath = null;
+            this._clearConnectBaseline();
             this._cleanupRulesFile();
         }
     }
@@ -474,6 +492,8 @@ class OpenVpnIndicator extends PanelMenu.Button {
 
         this._stopIpPoll();
         this._stopConnectTimeout();
+        this._stopVpnReadyValidation();
+        this._clearConnectBaseline();
 
         if (this._cancellable) {
             this._cancellable.cancel();
@@ -547,12 +567,20 @@ class OpenVpnIndicator extends PanelMenu.Button {
                     this._appendDebugLog(profile,
                         `[${new Date().toISOString()}] [askpin] ${line}`);
 
-                    // Detect successful VPN initialization
-                    if (line.includes('Initialization Sequence Completed')) {
+                    // Detect successful VPN initialization on real OpenVPN
+                    // output lines (including timestamp-prefixed variants),
+                    // while avoiding expect debug trace lines.
+                    let trimmedLine = line.trim();
+                    let isExpectTrace = trimmedLine.startsWith('expect:') ||
+                        trimmedLine.includes('match regular expression') ||
+                        trimmedLine.includes('expect_out(');
+                    let isInitComplete = /Initialization Sequence Completed\s*$/.test(trimmedLine);
+
+                    if (!isExpectTrace && isInitComplete) {
                         this._stopConnectTimeout();
-                        this._updateProfileState(
-                            profile, VPN_STATE.CONNECTED, null);
-                        this._startIpPoll(profile);
+                        this._appendDebugLog(profile,
+                            `[${new Date().toISOString()}] [extension] OpenVPN reported initialization complete; waiting for VPN interface/IP`);
+                        this._startVpnReadyValidation(profile);
                     }
 
                     readLine(); // schedule read of next line
@@ -599,6 +627,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
 
         this._stopIpPoll();
         this._stopConnectTimeout();
+        this._stopVpnReadyValidation();
         this._updateProfileState(profile, VPN_STATE.DISCONNECTED, null);
 
         if (this._activeProfileName === profile.name) {
@@ -606,6 +635,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
             this._activeProfileName = null;
             this._cleanupRulesFile();
             this._activeDebugLogPath = null;
+            this._clearConnectBaseline();
         }
     }
 
@@ -675,13 +705,98 @@ class OpenVpnIndicator extends PanelMenu.Button {
         }
     }
 
+    _startVpnReadyValidation(profile) {
+        this._stopVpnReadyValidation();
+        this._vpnReadyChecks = 0;
+
+        this._checkPublicIp(profile, {allowPromoteFromConnecting: true});
+
+        this._vpnReadyTimer = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT,
+            VPN_READY_POLL_INTERVAL_MS,
+            () => {
+                if (this._activeProfileName !== profile.name)
+                    return this._stopVpnReadyValidation();
+
+                if (profile.state === VPN_STATE.CONNECTED)
+                    return this._stopVpnReadyValidation();
+
+                if (profile.state !== VPN_STATE.CONNECTING)
+                    return this._stopVpnReadyValidation();
+
+                this._vpnReadyChecks += 1;
+                this._checkPublicIp(profile, {allowPromoteFromConnecting: true});
+
+                let elapsedMs = this._vpnReadyChecks * VPN_READY_POLL_INTERVAL_MS;
+                if (elapsedMs >= VPN_READY_TIMEOUT_MS) {
+                    let reason = 'OpenVPN initialized but no VPN interface/IP was detected.';
+                    this._lastAskpinError = reason;
+                    this._notifyConnectionError(profile, reason);
+                    this._appendDebugLog(profile,
+                        `[${new Date().toISOString()}] [extension] ${reason}`);
+
+                    if (this._activeProcess) {
+                        try { this._activeProcess.send_signal(15); } catch (_e) { /* ignore */ }
+                    }
+
+                    return this._stopVpnReadyValidation();
+                }
+
+                return GLib.SOURCE_CONTINUE;
+            });
+    }
+
+    _stopVpnReadyValidation() {
+        if (this._vpnReadyTimer !== null) {
+            GLib.source_remove(this._vpnReadyTimer);
+            this._vpnReadyTimer = null;
+        }
+        return GLib.SOURCE_REMOVE;
+    }
+
+    _captureConnectBaseline(profile) {
+        this._connectBaselineVpnRecords = [];
+        this._connectBaselineVpnRecordSet = new Set();
+
+        try {
+            let proc = Gio.Subprocess.new(
+                ['ip', '-4', '-o', 'addr', 'show', 'scope', 'global'],
+                Gio.SubprocessFlags.STDOUT_PIPE |
+                Gio.SubprocessFlags.STDERR_SILENCE);
+
+            let [, stdout] = proc.communicate_utf8(null, null);
+            let records = this._parseIpAddressRecords(stdout ?? '');
+            let vpnRecords = records.filter(record => VPN_IFACE_REGEX.test(record.iface));
+
+            this._connectBaselineVpnRecords = vpnRecords;
+            this._connectBaselineVpnRecordSet = new Set(
+                vpnRecords.map(record => `${record.iface}|${record.ip}`)
+            );
+
+            let baselineText = vpnRecords.length > 0
+                ? vpnRecords.map(record => `${record.iface}:${record.ip}`).join(', ')
+                : '(none)';
+            this._appendDebugLog(profile,
+                `[${new Date().toISOString()}] [extension] connect baseline vpn-iface/ip=${baselineText}`);
+        } catch (_e) {
+            this._appendDebugLog(profile,
+                `[${new Date().toISOString()}] [extension] connect baseline capture unavailable`);
+        }
+    }
+
+    _clearConnectBaseline() {
+        this._connectBaselineVpnRecords = [];
+        this._connectBaselineVpnRecordSet = new Set();
+    }
+
     /**
      * Fetch the current local IPv4 address via the ip command and update the
      * menu item. Prefers VPN-style interfaces (tun/tap/wg/ppp) when present.
      *
      * @param {object} profile - Profile to update with the retrieved IP
      */
-    _checkPublicIp(profile) {
+    _checkPublicIp(profile, options = {}) {
+        let allowPromoteFromConnecting = options.allowPromoteFromConnecting === true;
         try {
             let proc = Gio.Subprocess.new(
                 ['ip', '-4', '-o', 'addr', 'show', 'scope', 'global'],
@@ -691,20 +806,54 @@ class OpenVpnIndicator extends PanelMenu.Button {
             proc.communicate_utf8_async(null, null, (_p, res) => {
                 try {
                     let [, stdout] = _p.communicate_utf8_finish(res);
-                    let ip = this._extractIpFromIpCommandOutput(stdout);
+                    let records = this._parseIpAddressRecords(stdout ?? '');
+                    let vpnRecords = records.filter(record => VPN_IFACE_REGEX.test(record.iface));
+                    let currentRecord = vpnRecords.length > 0 ? vpnRecords[0] : null;
+                    let diffRecord = this._findVpnDiffRecord(vpnRecords);
+                    let ip = (diffRecord ?? currentRecord)?.ip ?? null;
+
+                    let diffText = diffRecord ? `${diffRecord.iface}:${diffRecord.ip}` : '(none)';
+                    this._appendDebugLog(profile,
+                        `[${new Date().toISOString()}] [extension] ip probe: vpn-ip=${ip ?? '(none)'} diff=${diffText}`);
+
                     if (ip && profile.state === VPN_STATE.CONNECTED) {
                         profile.ipAddress = ip;
                         let item = this._menuItems.get(profile.name);
                         if (item) item.updateState(VPN_STATE.CONNECTED, ip);
+                    } else if (diffRecord && allowPromoteFromConnecting && profile.state === VPN_STATE.CONNECTING) {
+                        this._appendDebugLog(profile,
+                            `[${new Date().toISOString()}] [extension] VPN iface/IP diff detected (${diffRecord.iface}:${diffRecord.ip}); promoting state to CONNECTED`);
+                        this._updateProfileState(profile, VPN_STATE.CONNECTED, diffRecord.ip);
+                        this._startIpPoll(profile);
+                        this._stopVpnReadyValidation();
                     }
                 } catch (_e) { /* ignore transient command errors */ }
             });
         } catch (_e) { /* ip command unavailable; silently skip */ }
     }
 
-    _extractIpFromIpCommandOutput(stdout) {
-        if (!stdout)
+    _findVpnDiffRecord(vpnRecords) {
+        if (!Array.isArray(vpnRecords) || vpnRecords.length === 0)
             return null;
+
+        for (let record of vpnRecords) {
+            let key = `${record.iface}|${record.ip}`;
+            if (!this._connectBaselineVpnRecordSet.has(key))
+                return record;
+        }
+
+        return null;
+    }
+
+    _extractIpFromIpCommandOutput(stdout) {
+        let records = this._parseIpAddressRecords(stdout);
+        let vpnRecord = records.find(record => VPN_IFACE_REGEX.test(record.iface));
+        return vpnRecord ? vpnRecord.ip : null;
+    }
+
+    _parseIpAddressRecords(stdout) {
+        if (!stdout)
+            return [];
 
         let records = [];
         for (let rawLine of stdout.split('\n')) {
@@ -721,11 +870,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
             records.push({iface, ip});
         }
 
-        if (records.length === 0)
-            return null;
-
-        let vpnRecord = records.find(record => VPN_IFACE_REGEX.test(record.iface));
-        return vpnRecord ? vpnRecord.ip : records[0].ip;
+        return records;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
