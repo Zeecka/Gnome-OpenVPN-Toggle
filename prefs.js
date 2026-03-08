@@ -13,8 +13,17 @@ import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/ex
 import Gtk    from 'gi://Gtk';
 import Gio    from 'gi://Gio';
 import GLib   from 'gi://GLib';
+import Secret from 'gi://Secret';
 
 const CONFIG_TYPE_OPTIONS = ['static', 'prompt'];
+const INTERACTIVE_SECRET_SCHEMA = new Secret.Schema(
+    'org.gnome.shell.extensions.gnome-openvpn-toggle.interactive-input',
+    Secret.SchemaFlags.NONE,
+    {
+        profile: Secret.SchemaAttributeType.STRING,
+        id: Secret.SchemaAttributeType.STRING,
+    }
+);
 
 export default class OpenVPNPreferences extends ExtensionPreferences {
 
@@ -137,17 +146,21 @@ export default class OpenVPNPreferences extends ExtensionPreferences {
     let uiState = {
         rowsByProfile: new Map(),
         legacyEntries: _collectLegacyEntries(parsedConfig, profilePaths),
+        hasAdminAuth: false,
     };
 
     for (let profilePath of profilePaths) {
         let existingEntry = _findProfileConfigEntry(parsedConfig, profilePath);
-        let rows = _normalizeInputs(existingEntry ? existingEntry.inputs : []);
+        let rows = _normalizeInputs(existingEntry ? existingEntry.inputs : [], profilePath, {
+            fromStorage: true,
+            resolveSecrets: false,
+        });
         uiState.rowsByProfile.set(profilePath, rows);
 
         let section = _buildProfileConfigSection(profilePath, rows,
             nextRows => {
                 uiState.rowsByProfile.set(profilePath, nextRows);
-                _saveGuiConfig(settings, uiState, statusLabel);
+                _saveGuiConfig(settings, uiState, statusLabel, root);
             });
         configContainer.append(section);
     }
@@ -157,8 +170,6 @@ export default class OpenVPNPreferences extends ExtensionPreferences {
 
     root.append(configContainer);
     root.append(statusLabel);
-
-    _saveGuiConfig(settings, uiState, statusLabel, false);
 
     return root;
     } // getPreferencesWidget
@@ -198,8 +209,10 @@ function _validateInteractiveConfig(config) {
                 throw new Error(`Entry ${i}.inputs[${j}].input must be a non-empty string`);
             if (input.type !== 'static' && input.type !== 'prompt')
                 throw new Error(`Entry ${i}.inputs[${j}].type must be static or prompt`);
-            if (typeof input.value !== 'string')
-                throw new Error(`Entry ${i}.inputs[${j}].value must be a string`);
+            let hasInlineValue = typeof input.value === 'string';
+            let hasSecretRef = typeof input.secret_id === 'string' && input.secret_id.length > 0;
+            if (!hasInlineValue && !hasSecretRef)
+                throw new Error(`Entry ${i}.inputs[${j}] must contain value or secret_id`);
         }
     }
 }
@@ -260,7 +273,10 @@ function _findProfileConfigEntry(config, profilePath) {
     }) || null;
 }
 
-function _normalizeInputs(inputs) {
+function _normalizeInputs(inputs, profilePath = null, options = {}) {
+    let fromStorage = options.fromStorage === true;
+    let resolveSecrets = options.resolveSecrets === true;
+
     if (!Array.isArray(inputs))
         return [];
 
@@ -272,13 +288,27 @@ function _normalizeInputs(inputs) {
             continue;
         if (input.type !== 'static' && input.type !== 'prompt')
             continue;
-        if (typeof input.value !== 'string')
+
+        let secretId = typeof input.secret_id === 'string' ? input.secret_id : '';
+        let hasInlineValue = typeof input.value === 'string';
+        let hasSecretRef = profilePath && secretId !== '';
+        if (!hasInlineValue && !hasSecretRef)
             continue;
+
+        let persistedValue = '';
+        if (hasInlineValue)
+            persistedValue = input.value;
+        else if (hasSecretRef && resolveSecrets)
+            persistedValue = _lookupInteractiveSecret(profilePath, secretId);
+
+        let value = fromStorage ? '' : persistedValue;
 
         normalized.push({
             input: input.input,
             type: input.type,
-            value: input.value,
+            value,
+            secret_id: secretId,
+            stored_value: persistedValue,
         });
     }
     return normalized;
@@ -329,7 +359,7 @@ function _buildProfileConfigSection(profilePath, initialRows, onRowsChanged) {
             });
             inputEntry.connect('changed', () => {
                 rows[i].input = inputEntry.get_text();
-                onRowsChanged(_normalizeInputs(rows));
+                onRowsChanged(_normalizeInputs(rows, profilePath));
             });
 
             let typeCombo = new Gtk.ComboBoxText();
@@ -338,7 +368,7 @@ function _buildProfileConfigSection(profilePath, initialRows, onRowsChanged) {
             typeCombo.set_active(CONFIG_TYPE_OPTIONS.indexOf(rowData.type));
             typeCombo.connect('changed', () => {
                 rows[i].type = typeCombo.get_active_text();
-                onRowsChanged(_normalizeInputs(rows));
+                onRowsChanged(_normalizeInputs(rows, profilePath));
             });
 
             let valueEntry = new Gtk.Entry({
@@ -346,15 +376,18 @@ function _buildProfileConfigSection(profilePath, initialRows, onRowsChanged) {
                 placeholder_text: 'Value or prompt label',
                 text: rowData.value,
             });
+            if (rowData.secret_id && rowData.value === '')
+                valueEntry.set_placeholder_text('Stored in GNOME Keyring (hidden)');
             valueEntry.connect('changed', () => {
                 rows[i].value = valueEntry.get_text();
-                onRowsChanged(_normalizeInputs(rows));
+                rows[i].stored_value = '';
+                onRowsChanged(_normalizeInputs(rows, profilePath));
             });
 
             let removeBtn = new Gtk.Button({ label: 'Remove' });
             removeBtn.connect('clicked', () => {
                 rows.splice(i, 1);
-                onRowsChanged(_normalizeInputs(rows));
+                onRowsChanged(_normalizeInputs(rows, profilePath));
                 renderRows();
             });
 
@@ -368,9 +401,9 @@ function _buildProfileConfigSection(profilePath, initialRows, onRowsChanged) {
 
     let addBtn = new Gtk.Button({ label: 'Add input' });
     addBtn.connect('clicked', () => {
-        rows.push({ input: '', type: 'prompt', value: '' });
+        rows.push({ input: '', type: 'prompt', value: '', secret_id: '' });
         renderRows();
-        onRowsChanged(_normalizeInputs(rows));
+        onRowsChanged(_normalizeInputs(rows, profilePath));
     });
 
     section.append(addBtn);
@@ -400,17 +433,51 @@ function _collectLegacyEntries(config, profilePaths) {
     })).filter(entry => entry.inputs.length > 0);
 }
 
-function _saveGuiConfig(settings, uiState, statusLabel, showStatus = true) {
+function _saveGuiConfig(settings, uiState, statusLabel, root, showStatus = true) {
+    if (showStatus && !uiState.hasAdminAuth) {
+        let ok = _requestAdminAuthentication();
+        if (!ok) {
+            statusLabel.set_text('Save blocked: admin authentication is required to edit interactive inputs.');
+            return;
+        }
+        uiState.hasAdminAuth = true;
+        _hydrateStoredSecrets(uiState);
+    }
+
     let config = [];
 
     for (let [profilePath, rows] of uiState.rowsByProfile.entries()) {
-        let inputs = _normalizeInputs(rows);
+        let inputs = _normalizeInputs(rows, profilePath);
         if (inputs.length === 0)
             continue;
 
+        let persistedInputs = [];
+        for (let input of inputs) {
+            let secretId = input.secret_id;
+            if (!secretId)
+                secretId = GLib.uuid_string_random();
+
+            let effectiveValue = input.value;
+            if (effectiveValue === '' && typeof input.stored_value === 'string')
+                effectiveValue = input.stored_value;
+
+            let stored = _storeInteractiveSecret(profilePath, secretId, effectiveValue);
+            if (!stored) {
+                if (showStatus)
+                    statusLabel.set_text(`Failed to store secret for ${GLib.path_get_basename(profilePath)}.`);
+                return;
+            }
+
+            persistedInputs.push({
+                input: input.input,
+                type: input.type,
+                secret_id: secretId,
+            });
+        }
+
         config.push({
             vpn: profilePath,
-            inputs,
+            inputs: persistedInputs,
         });
     }
 
@@ -425,5 +492,72 @@ function _saveGuiConfig(settings, uiState, statusLabel, showStatus = true) {
     } catch (e) {
         if (showStatus)
             statusLabel.set_text(`Invalid entry: ${e.message}`);
+    }
+}
+
+function _hydrateStoredSecrets(uiState) {
+    for (let [profilePath, rows] of uiState.rowsByProfile.entries()) {
+        for (let row of rows) {
+            if (!row || typeof row !== 'object')
+                continue;
+            if (row.value !== '')
+                continue;
+
+            if (typeof row.stored_value === 'string' && row.stored_value !== '')
+                continue;
+
+            if (typeof row.secret_id === 'string' && row.secret_id !== '')
+                row.stored_value = _lookupInteractiveSecret(profilePath, row.secret_id);
+        }
+    }
+}
+
+function _requestAdminAuthentication() {
+    try {
+        let proc = Gio.Subprocess.new(
+            ['pkexec', '/usr/bin/true'],
+            Gio.SubprocessFlags.STDOUT_SILENCE |
+            Gio.SubprocessFlags.STDERR_PIPE
+        );
+
+        proc.communicate_utf8(null, null);
+        return proc.get_successful();
+    } catch (_e) {
+        return false;
+    }
+}
+
+function _lookupInteractiveSecret(profilePath, secretId) {
+    if (!profilePath || !secretId)
+        return '';
+
+    try {
+        let value = Secret.password_lookup_sync(
+            INTERACTIVE_SECRET_SCHEMA,
+            { profile: profilePath, id: secretId },
+            null
+        );
+        return typeof value === 'string' ? value : '';
+    } catch (_e) {
+        return '';
+    }
+}
+
+function _storeInteractiveSecret(profilePath, secretId, value) {
+    if (!profilePath || !secretId)
+        return false;
+
+    try {
+        Secret.password_store_sync(
+            INTERACTIVE_SECRET_SCHEMA,
+            { profile: profilePath, id: secretId },
+            Secret.COLLECTION_DEFAULT,
+            `OpenVPN Toggle: ${GLib.path_get_basename(profilePath)} (${secretId})`,
+            value,
+            null
+        );
+        return true;
+    } catch (_e) {
+        return false;
     }
 }

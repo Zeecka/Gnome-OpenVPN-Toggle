@@ -46,6 +46,7 @@
 import GLib    from 'gi://GLib';
 import Gio     from 'gi://Gio';
 import GObject from 'gi://GObject';
+import Secret  from 'gi://Secret';
 import St      from 'gi://St';
 import Clutter from 'gi://Clutter';
 
@@ -76,6 +77,15 @@ const CONNECT_TIMEOUT_MS = 120000;
 const VPN_READY_TIMEOUT_MS = 20000;
 /** Poll interval (ms) while waiting for VPN interface/IP after init-complete */
 const VPN_READY_POLL_INTERVAL_MS = 1000;
+
+const INTERACTIVE_SECRET_SCHEMA = new Secret.Schema(
+    'org.gnome.shell.extensions.gnome-openvpn-toggle.interactive-input',
+    Secret.SchemaFlags.NONE,
+    {
+        profile: Secret.SchemaAttributeType.STRING,
+        id: Secret.SchemaAttributeType.STRING,
+    }
+);
 
 // ── VpnProfileMenuItem ───────────────────────────────────────────────────────
 
@@ -917,13 +927,22 @@ class OpenVpnIndicator extends PanelMenu.Button {
                 continue;
             if (input.type !== 'static' && input.type !== 'prompt')
                 continue;
-            if (typeof input.value !== 'string')
+
+            let hasInlineValue = typeof input.value === 'string';
+            let hasSecretRef = typeof input.secret_id === 'string' && input.secret_id.length > 0;
+            if (!hasInlineValue && !hasSecretRef)
                 continue;
+
+            let resolvedValue = '';
+            if (hasSecretRef)
+                resolvedValue = this._lookupInteractiveSecret(profile.path, input.secret_id);
+            else if (hasInlineValue)
+                resolvedValue = input.value;
 
             validInputs.push({
                 input: input.input,
                 type : input.type,
-                value: input.value,
+                value: resolvedValue,
             });
         }
 
@@ -932,6 +951,22 @@ class OpenVpnIndicator extends PanelMenu.Button {
 
     _hasInteractiveConfigForProfile(profile) {
         return this._getInteractiveInputsForProfile(profile).length > 0;
+    }
+
+    _lookupInteractiveSecret(profilePath, secretId) {
+        if (!profilePath || !secretId)
+            return '';
+
+        try {
+            let value = Secret.password_lookup_sync(
+                INTERACTIVE_SECRET_SCHEMA,
+                { profile: profilePath, id: secretId },
+                null
+            );
+            return typeof value === 'string' ? value : '';
+        } catch (_e) {
+            return '';
+        }
     }
 
     _openProfileConfiguration(_profile) {
