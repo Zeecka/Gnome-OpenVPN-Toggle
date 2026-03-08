@@ -39,7 +39,7 @@
  * The extension reads stdout of the askpin.exp process line-by-line
  * (Gio.DataInputStream.read_line_async).  When the line
  * "Initialization Sequence Completed" appears, the profile state moves to
- * CONNECTED and public-IP polling starts.  When stdout reaches EOF (process
+ * CONNECTED and IP polling starts.  When stdout reaches EOF (process
  * exits for any reason) the state returns to DISCONNECTED.
  */
 
@@ -64,11 +64,14 @@ const VPN_STATE = {
     CONNECTED    : 'connected',
 };
 
-/** Public-IP service used to show the current IP when connected */
-const IP_CHECK_URL = 'https://api.ipify.org';
+/** Regex matching common VPN interface prefixes */
+const VPN_IFACE_REGEX = /^(tun|tap|wg|ppp)/;
 
-/** How often (ms) to refresh the public IP while connected */
+/** How often (ms) to refresh the displayed IP while connected */
 const IP_POLL_INTERVAL_MS = 15000;
+
+/** Max time (ms) allowed to establish VPN before considering it stuck */
+const CONNECT_TIMEOUT_MS = 120000;
 
 // ── VpnProfileMenuItem ───────────────────────────────────────────────────────
 
@@ -87,11 +90,12 @@ class VpnProfileMenuItem extends PopupMenu.PopupBaseMenuItem {
      * @param {object}   profile  - Profile data object (name, path, state…)
      * @param {Function} onToggle - Callback(profile, enabled) when switch changes
      */
-    _init(profile, onToggle) {
+    _init(profile, onToggle, onConfigure) {
         super._init({ reactive: true });
 
         this._profile      = profile;
         this._onToggle     = onToggle;
+        this._onConfigure  = onConfigure;
         this._suppressNext = false; // guard against re-entrancy
 
         // ── Layout box ────────────────────────────────────────────────────
@@ -100,7 +104,7 @@ class VpnProfileMenuItem extends PopupMenu.PopupBaseMenuItem {
 
         // Profile name (expands to fill available width)
         this._nameLabel = new St.Label({
-            text       : profile.name,
+            text: profile.needsConfig ? `⚠️\ ${profile.name}` : profile.name,
             x_expand   : true,
             y_align    : Clutter.ActorAlign.CENTER,
             style_class: 'vpn-profile-name',
@@ -122,21 +126,56 @@ class VpnProfileMenuItem extends PopupMenu.PopupBaseMenuItem {
         // Activate fires when the user clicks the item
         this.connect('activate', () => {
             if (this._suppressNext) return;
-            let newState = !this._switch.state;
-            this._switch.setToggleState(newState);
+
+            if (this._profile.needsConfig) {
+                if (this._onConfigure)
+                    this._onConfigure(this._profile);
+                return;
+            }
+
+            let newState = !this._getSwitchState();
+            this._setSwitchState(newState);
             this._onToggle(this._profile, newState);
         });
+    }
+
+    _getSwitchState() {
+        if (this._switch && typeof this._switch.state === 'boolean')
+            return this._switch.state;
+        if (this._switch && typeof this._switch.checked === 'boolean')
+            return this._switch.checked;
+        return false;
+    }
+
+    _setSwitchState(enabled) {
+        if (typeof this.setToggleState === 'function') {
+            this.setToggleState(enabled);
+            return;
+        }
+
+        if (!this._switch)
+            return;
+
+        if (typeof this._switch.setToggleState === 'function') {
+            this._switch.setToggleState(enabled);
+            return;
+        }
+
+        if ('state' in this._switch)
+            this._switch.state = enabled;
+        else if ('checked' in this._switch)
+            this._switch.checked = enabled;
     }
 
     /**
      * Programmatically update the displayed state (does NOT trigger onToggle).
      *
      * @param {string}      state     - One of VPN_STATE values
-     * @param {string|null} ipAddress - Public IP to display when connected
+    * @param {string|null} ipAddress - IP to display when connected
      */
     updateState(state, ipAddress = null) {
         this._suppressNext = true;
-        this._switch.setToggleState(state !== VPN_STATE.DISCONNECTED);
+        this._setSwitchState(state !== VPN_STATE.DISCONNECTED);
         this._suppressNext = false;
 
         this._statusLabel.text        = _stateLabel(state, ipAddress);
@@ -185,8 +224,16 @@ class OpenVpnIndicator extends PanelMenu.Button {
         this._activeProfileName = null;
         /** Gio.Cancellable for async I/O on the active process */
         this._cancellable       = null;
-        /** GLib timeout source ID for public-IP polling, or null */
+        /** GLib timeout source ID for IP polling, or null */
         this._ipTimer           = null;
+        /** GLib timeout source ID for connection watchdog, or null */
+        this._connectTimer      = null;
+        /** Temporary rules file path used by askpin.exp for active profile */
+        this._activeRulesFile   = null;
+        /** Last askpin error text observed from merged process output */
+        this._lastAskpinError   = null;
+        /** Current profile debug log path (.ovpn.log), or null */
+        this._activeDebugLogPath = null;
 
         // ── Panel icon ────────────────────────────────────────────────────
         this.add_child(new St.Icon({
@@ -280,11 +327,15 @@ class OpenVpnIndicator extends PanelMenu.Button {
                 path     : f.path,
                 state    : existing ? existing.state    : VPN_STATE.DISCONNECTED,
                 ipAddress: existing ? existing.ipAddress : null,
+                debugLogPath: existing ? existing.debugLogPath : null,
+                needsConfig: !this._hasInteractiveConfigForProfile(f),
             };
             this._profiles.set(f.name, profile);
 
             let item = new VpnProfileMenuItem(
-                profile, (p, on) => this._handleToggle(p, on));
+                profile,
+                (p, on) => this._handleToggle(p, on),
+                p => this._openProfileConfiguration(p));
             item.updateState(profile.state, profile.ipAddress);
 
             this._menuItems.set(f.name, item);
@@ -343,6 +394,13 @@ class OpenVpnIndicator extends PanelMenu.Button {
     _connectVpn(profile) {
         this._updateProfileState(profile, VPN_STATE.CONNECTING, null);
 
+        if (this._isDebugEnabled())
+            this._activeDebugLogPath = this._prepareDebugLog(profile);
+        else
+            this._activeDebugLogPath = null;
+
+        profile.debugLogPath = this._activeDebugLogPath;
+
         let extDir    = this._extPath;
         let askpass   = GLib.build_filenamev([extDir, 'scripts', 'askpass.exp']);
         let askpin    = GLib.build_filenamev([extDir, 'scripts', 'askpin.exp']);
@@ -369,20 +427,39 @@ class OpenVpnIndicator extends PanelMenu.Button {
             if (val) launcher.setenv(v, val, true);
         }
 
+        let rulesFile = this._createInteractiveRulesFile(profile);
+
         try {
-            // Launch: expect askpin.exp <ovpn_path>
-            this._activeProcess = launcher.spawnv(
-                ['expect', askpin, profile.path]);
+            // Launch: expect askpin.exp <ovpn_path> [rules_file]
+            let argv = ['expect', askpin, profile.path];
+            if (rulesFile)
+                argv.push(rulesFile);
+            else if (this._activeDebugLogPath)
+                argv.push('');
+
+            if (this._activeDebugLogPath)
+                argv.push(this._activeDebugLogPath);
+
+            this._activeProcess = launcher.spawnv(argv);
             this._activeProfileName = profile.name;
             this._cancellable       = new Gio.Cancellable();
+            this._activeRulesFile   = rulesFile;
+            this._lastAskpinError   = null;
+
+            this._appendDebugLog(profile,
+                `[${new Date().toISOString()}] [extension] Spawned askpin wrapper for ${profile.path}`);
+
+            this._startConnectTimeout(profile);
 
             // Start monitoring stdout for status messages and process exit
             this._monitorProcess(profile);
         } catch (e) {
-            console.error('[OpenVPN Toggle] Failed to start OpenVPN', e);
+            this._logProfileError(profile, 'Failed to start OpenVPN process', e);
             this._updateProfileState(profile, VPN_STATE.DISCONNECTED, null);
             this._activeProcess     = null;
             this._activeProfileName = null;
+            this._activeDebugLogPath = null;
+            this._cleanupRulesFile();
         }
     }
 
@@ -396,6 +473,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
         if (!profile) return;
 
         this._stopIpPoll();
+        this._stopConnectTimeout();
 
         if (this._cancellable) {
             this._cancellable.cancel();
@@ -409,8 +487,16 @@ class OpenVpnIndicator extends PanelMenu.Button {
             this._activeProcess = null;
         }
 
+        this._cleanupRulesFile();
+
         if (this._activeProfileName === profile.name)
             this._activeProfileName = null;
+
+        if (profile.debugLogPath)
+            this._appendDebugLog(profile,
+                `[${new Date().toISOString()}] [extension] Disconnect requested by user`);
+
+        this._activeDebugLogPath = null;
 
         this._updateProfileState(profile, VPN_STATE.DISCONNECTED, null);
     }
@@ -429,9 +515,10 @@ class OpenVpnIndicator extends PanelMenu.Button {
      */
     _monitorProcess(profile) {
         let stream = new Gio.DataInputStream({
-            base_stream          : this._activeProcess.get_stdout_pipe(),
-            close_base_on_dispose: true,
+            base_stream: this._activeProcess.get_stdout_pipe(),
         });
+        if (typeof stream.set_close_base_stream === 'function')
+            stream.set_close_base_stream(true);
         let cancellable = this._cancellable;
 
         // Recursive async line reader
@@ -442,8 +529,9 @@ class OpenVpnIndicator extends PanelMenu.Button {
                     try {
                         [line] = s.read_line_finish_utf8(res);
                     } catch (e) {
-                        if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
-                            console.error('[OpenVPN Toggle] Process read error', e);
+                        if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
+                            this._logProfileError(profile, 'Process read error', e);
+                        }
                         return;
                     }
 
@@ -453,8 +541,15 @@ class OpenVpnIndicator extends PanelMenu.Button {
                         return;
                     }
 
+                    if (line.startsWith('askpin:'))
+                        this._lastAskpinError = line.replace(/^askpin:\s*/, '');
+
+                    this._appendDebugLog(profile,
+                        `[${new Date().toISOString()}] [askpin] ${line}`);
+
                     // Detect successful VPN initialization
                     if (line.includes('Initialization Sequence Completed')) {
+                        this._stopConnectTimeout();
                         this._updateProfileState(
                             profile, VPN_STATE.CONNECTED, null);
                         this._startIpPoll(profile);
@@ -468,7 +563,29 @@ class OpenVpnIndicator extends PanelMenu.Button {
         // Secondary watcher: fires when the process exits (covers the case
         // where stdout closes without a final newline)
         this._activeProcess.wait_async(cancellable, (_proc, res) => {
-            try { _proc.wait_finish(res); } catch (_e) { /* cancelled */ }
+            try {
+                _proc.wait_finish(res);
+
+                if (this._activeProfileName === profile.name &&
+                    profile.state !== VPN_STATE.CONNECTED) {
+                    let reason = this._lastAskpinError;
+                    if (!reason) {
+                        if (_proc.get_if_exited()) {
+                            let code = _proc.get_exit_status();
+                            if (code !== 0)
+                                reason = `OpenVPN exited before connection was established (exit code ${code}).`;
+                        } else if (_proc.get_if_signaled()) {
+                            reason = `OpenVPN process was interrupted (signal ${_proc.get_term_sig()}).`;
+                        }
+                    }
+
+                    if (reason)
+                        this._notifyConnectionError(profile, reason);
+
+                    this._appendDebugLog(profile,
+                        `[${new Date().toISOString()}] [extension] Connection ended before ready${reason ? `: ${reason}` : ''}`);
+                }
+            } catch (_e) { /* cancelled */ }
             this._onProcessExit(profile);
         });
     }
@@ -481,21 +598,24 @@ class OpenVpnIndicator extends PanelMenu.Button {
         if (profile.state === VPN_STATE.DISCONNECTED) return; // already handled
 
         this._stopIpPoll();
+        this._stopConnectTimeout();
         this._updateProfileState(profile, VPN_STATE.DISCONNECTED, null);
 
         if (this._activeProfileName === profile.name) {
             this._activeProcess     = null;
             this._activeProfileName = null;
+            this._cleanupRulesFile();
+            this._activeDebugLogPath = null;
         }
     }
 
-    // ── Public-IP polling ────────────────────────────────────────────────────
+    // ── IP polling ───────────────────────────────────────────────────────────
 
     /**
-     * Start periodic public-IP checks.
+     * Start periodic IP checks.
      * Immediately fires one check then repeats every IP_POLL_INTERVAL_MS.
      *
-     * The check runs: curl -s --max-time 5 <IP_CHECK_URL>
+     * The check runs: ip -4 -o addr show scope global
      *
      * @param {object} profile - The connected profile to update with the IP
      */
@@ -521,34 +641,256 @@ class OpenVpnIndicator extends PanelMenu.Button {
         }
     }
 
+    _startConnectTimeout(profile) {
+        this._stopConnectTimeout();
+        this._connectTimer = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT,
+            CONNECT_TIMEOUT_MS,
+            () => {
+                this._connectTimer = null;
+
+                if (this._activeProfileName !== profile.name ||
+                    profile.state !== VPN_STATE.CONNECTING) {
+                    return GLib.SOURCE_REMOVE;
+                }
+
+                let reason = 'VPN appears stuck while connecting (timeout).';
+                this._lastAskpinError = reason;
+                this._notifyConnectionError(profile, reason);
+                this._appendDebugLog(profile,
+                    `[${new Date().toISOString()}] [extension] ${reason}`);
+
+                if (this._activeProcess) {
+                    try { this._activeProcess.send_signal(15); } catch (_e) { /* ignore */ }
+                }
+
+                return GLib.SOURCE_REMOVE;
+            });
+    }
+
+    _stopConnectTimeout() {
+        if (this._connectTimer !== null) {
+            GLib.source_remove(this._connectTimer);
+            this._connectTimer = null;
+        }
+    }
+
     /**
-     * Fetch the current public IP address via curl and update the menu item.
-     * Silently ignores errors (temporary network issues should not crash).
+     * Fetch the current local IPv4 address via the ip command and update the
+     * menu item. Prefers VPN-style interfaces (tun/tap/wg/ppp) when present.
      *
      * @param {object} profile - Profile to update with the retrieved IP
      */
     _checkPublicIp(profile) {
         try {
             let proc = Gio.Subprocess.new(
-                ['curl', '-s', '--max-time', '5', IP_CHECK_URL],
+                ['ip', '-4', '-o', 'addr', 'show', 'scope', 'global'],
                 Gio.SubprocessFlags.STDOUT_PIPE |
                 Gio.SubprocessFlags.STDERR_SILENCE);
 
             proc.communicate_utf8_async(null, null, (_p, res) => {
                 try {
                     let [, stdout] = _p.communicate_utf8_finish(res);
-                    let ip = stdout ? stdout.trim() : null;
+                    let ip = this._extractIpFromIpCommandOutput(stdout);
                     if (ip && profile.state === VPN_STATE.CONNECTED) {
                         profile.ipAddress = ip;
                         let item = this._menuItems.get(profile.name);
                         if (item) item.updateState(VPN_STATE.CONNECTED, ip);
                     }
-                } catch (_e) { /* ignore transient curl errors */ }
+                } catch (_e) { /* ignore transient command errors */ }
             });
-        } catch (_e) { /* curl may not be installed; silently skip */ }
+        } catch (_e) { /* ip command unavailable; silently skip */ }
+    }
+
+    _extractIpFromIpCommandOutput(stdout) {
+        if (!stdout)
+            return null;
+
+        let records = [];
+        for (let rawLine of stdout.split('\n')) {
+            let line = rawLine.trim();
+            if (!line)
+                continue;
+
+            let match = line.match(/^\d+:\s+([^\s]+)\s+inet\s+([0-9.]+)\/\d+/);
+            if (!match)
+                continue;
+
+            let iface = match[1];
+            let ip    = match[2];
+            records.push({iface, ip});
+        }
+
+        if (records.length === 0)
+            return null;
+
+        let vpnRecord = records.find(record => VPN_IFACE_REGEX.test(record.iface));
+        return vpnRecord ? vpnRecord.ip : records[0].ip;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    _getInteractiveInputsForProfile(profile) {
+        let raw = this._settings.get_string('interactive-config');
+        if (!raw || raw.trim() === '')
+            return [];
+
+        let parsed;
+        try {
+            parsed = JSON.parse(raw);
+        } catch (e) {
+            console.error('[OpenVPN Toggle] interactive-config is not valid JSON', e);
+            return [];
+        }
+
+        if (!Array.isArray(parsed)) {
+            console.error('[OpenVPN Toggle] interactive-config must be a JSON array');
+            return [];
+        }
+
+        let baseName = GLib.path_get_basename(profile.path);
+        let altName  = `${profile.name}.ovpn`;
+        let matched = parsed.find(entry => {
+            if (!entry || typeof entry !== 'object')
+                return false;
+            if (typeof entry.vpn !== 'string')
+                return false;
+            return entry.vpn === profile.path ||
+                   entry.vpn === baseName ||
+                   entry.vpn === profile.name ||
+                   entry.vpn === altName;
+        });
+
+        if (!matched || !Array.isArray(matched.inputs))
+            return [];
+
+        let validInputs = [];
+        for (let input of matched.inputs) {
+            if (!input || typeof input !== 'object')
+                continue;
+            if (typeof input.input !== 'string' || input.input.length === 0)
+                continue;
+            if (input.type !== 'static' && input.type !== 'prompt')
+                continue;
+            if (typeof input.value !== 'string')
+                continue;
+
+            validInputs.push({
+                input: input.input,
+                type : input.type,
+                value: input.value,
+            });
+        }
+
+        return validInputs;
+    }
+
+    _hasInteractiveConfigForProfile(profile) {
+        return this._getInteractiveInputsForProfile(profile).length > 0;
+    }
+
+    _openProfileConfiguration(_profile) {
+        this._openPrefs();
+    }
+
+    _notifyConnectionError(profile, message) {
+        let profileName = profile && profile.name ? profile.name : 'Unknown profile';
+        Main.notifyError('OpenVPN Toggle', `${profileName}: ${message}`);
+        this._appendDebugLog(profile,
+            `[${new Date().toISOString()}] [extension-error] ${profileName}: ${message}`);
+    }
+
+    _isDebugEnabled() {
+        return this._settings.get_boolean('debug-enabled');
+    }
+
+    _debugLogPathForProfile(profile) {
+        return `${profile.path}.log`;
+    }
+
+    _prepareDebugLog(profile) {
+        let logPath = this._debugLogPathForProfile(profile);
+        let header = [
+            `# OpenVPN Toggle debug log`,
+            `# profile: ${profile.path}`,
+            `# started: ${new Date().toISOString()}`,
+            '',
+        ].join('\n');
+
+        try {
+            GLib.file_set_contents(logPath, header);
+            return logPath;
+        } catch (e) {
+            console.error('[OpenVPN Toggle] Failed to create debug log file', e);
+            return null;
+        }
+    }
+
+    _appendDebugLog(profile, text) {
+        if (!profile || !profile.debugLogPath)
+            return;
+
+        try {
+            let file = Gio.File.new_for_path(profile.debugLogPath);
+            let stream = file.append_to(Gio.FileCreateFlags.NONE, null);
+            stream.write_all(`${text}\n`, null);
+            stream.close(null);
+        } catch (_e) {
+            /* ignore debug log write failures */
+        }
+    }
+
+    _logProfileError(profile, message, error) {
+        if (error)
+            console.error(`[OpenVPN Toggle] ${message}`, error);
+        else
+            console.error(`[OpenVPN Toggle] ${message}`);
+
+        let details = error && error.message ? `${message}: ${error.message}` : message;
+        this._appendDebugLog(profile,
+            `[${new Date().toISOString()}] [extension-error] ${details}`);
+    }
+
+    _escapeRuleField(value) {
+        return value
+            .replaceAll('\\', '\\\\')
+            .replaceAll('\t', '\\t')
+            .replaceAll('\n', '\\n')
+            .replaceAll('\r', '\\r');
+    }
+
+    _createInteractiveRulesFile(profile) {
+        let inputs = this._getInteractiveInputsForProfile(profile);
+        if (inputs.length === 0)
+            return null;
+
+        try {
+            let [fd, path] = GLib.file_open_tmp('openvpn-toggle-rules-XXXXXX');
+            try { GLib.close(fd); } catch (_e) { /* ignore */ }
+
+            let rows = inputs.map(input => [
+                this._escapeRuleField(input.input),
+                this._escapeRuleField(input.type),
+                this._escapeRuleField(input.value),
+            ].join('\t'));
+            GLib.file_set_contents(path, `${rows.join('\n')}\n`);
+            return path;
+        } catch (e) {
+            console.error('[OpenVPN Toggle] Failed creating interactive rules file', e);
+            return null;
+        }
+    }
+
+    _cleanupRulesFile() {
+        if (!this._activeRulesFile)
+            return;
+        try {
+            GLib.unlink(this._activeRulesFile);
+        } catch (_e) {
+            /* ignore cleanup failures */
+        }
+        this._activeRulesFile = null;
+    }
 
     /** Expand a leading ~ to the user's home directory */
     _expandPath(p) {
@@ -570,6 +912,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
     /** Called by GNOME Shell when the extension is disabled */
     destroy() {
         this._stopIpPoll();
+        this._stopConnectTimeout();
 
         if (this._cancellable) {
             this._cancellable.cancel();
@@ -580,6 +923,9 @@ class OpenVpnIndicator extends PanelMenu.Button {
             try { this._activeProcess.send_signal(15); } catch (_e) { /* gone */ }
             this._activeProcess = null;
         }
+
+        this._cleanupRulesFile();
+        this._activeDebugLogPath = null;
 
         super.destroy();
     }

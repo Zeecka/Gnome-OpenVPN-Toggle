@@ -12,5 +12,25 @@
       </description>
     </key>
 
+    <key name="interactive-config" type="s">
+      <default>'[]'</default>
+      <summary>Interactive Inputs Configuration</summary>
+      <description>
+        JSON array configuring interactive OpenVPN inputs per profile.
+        Each entry contains vpn and inputs, where inputs is an ordered list of
+        objects: input, type (static|prompt), and value.
+      </description>
+    </key>
+
+    <key name="debug-enabled" type="b">
+      <default>false</default>
+      <summary>Enable Debug Logging</summary>
+      <description>
+        When enabled, a .ovpn.log file is created next to each profile during
+        connection attempts. The log includes expect/spawn output and
+        extension-side errors related to that profile.
+      </description>
+    </key>
+
   </schema>
 </schemalist>
