@@ -1,67 +1,33 @@
 # Gnome-OpenVPN-Toggle
 
-A GNOME Shell extension that lets you toggle multiple OpenVPN profiles directly
-from the top panel. It manages OpenVPN CLI processes **without NetworkManager**
-and relies on options already declared in each `.ovpn` file.
+A GNOME Shell extension that lets you toggle OpenVPN profiles directly from the
+top panel without using NetworkManager.
 
 Supports **GNOME Shell 42 – 46**.
 
----
+## What it does
 
-## Features
-
-- **Panel icon** – click to open the profile list.
-- **Toggle switch** per profile – enable / disable with one click.
-- **Status indicator** – Disconnected / Connecting… / ● IP address.
-- **IP display** – shown next to the profile name once connected (from local `ip` command output).
-- **One-at-a-time enforcement** – enabling a new profile automatically
-  disconnects the active one.
-- **Auto-scan** – `.ovpn` files in the configured directory are detected
-  automatically; the list refreshes each time the menu opens.
-- **Interactive input handling** – per-profile prompt/response rules support
-  static values or pinentry-gnome3 dialogs.
-- **Unconfigured profile warning** – profiles without interactive inputs are
-  marked with `⚠️`; clicking them opens preferences to configure entries.
-- **Connection error notifications** – shows an explicit error when OpenVPN is
-  stuck connecting or when an expected interactive input is never found.
-- **Debug logs (optional)** – when enabled in preferences, writes
-  `profile.ovpn.log` next to each `.ovpn` file with expect/spawn output and
-  extension-side errors.
-- **Configurable** – profiles directory can be changed in extension preferences.
-
----
+- Shows detected `.ovpn` profiles in the panel menu.
+- Lets you connect/disconnect with a switch.
+- Displays connection state and connected IP.
+- Supports interactive credentials with GNOME pinentry dialogs.
+- Automatically disconnects an active profile when you connect another.
 
 ## Dependencies
 
-| Package | Purpose |
-|---|---|
-| `gnome-shell` ≥ 42 | Shell extension runtime |
-| `openvpn` | OpenVPN CLI |
-| `sudo` | Run OpenVPN as root |
-| `expect` | Wrapper / interactive automation scripts |
-| `pinentry-gnome3` | Native GNOME GUI dialogs for password / PIN |
-| `iproute2` (`ip`) | Local IPv4 lookup for menu status (optional; IP display silently skipped if absent) |
-
-Install on Debian/Ubuntu:
+Debian/Ubuntu:
 
 ```bash
 sudo apt install openvpn expect pinentry-gnome3 iproute2
 ```
 
-Install on Fedora/RHEL:
+Fedora/RHEL:
 
 ```bash
 sudo dnf install openvpn expect pinentry-gnome3 iproute
 ```
 
----
-
-## Installation
-
-### 1 – Copy extension files
-
-Clone the repository and copy the extension directory into GNOME's user
-extension path:
+## Install (manual)
 
 ```bash
 git clone https://github.com/Zeecka/Gnome-OpenVPN-Toggle.git
@@ -69,192 +35,40 @@ cd Gnome-OpenVPN-Toggle
 
 DEST="$HOME/.local/share/gnome-shell/extensions/gnome-openvpn-toggle@zeecka"
 mkdir -p "$DEST"
-cp -r metadata.json extension.js prefs.js stylesheet.css scripts schemas "$DEST/"
-```
-
-### 2 – Compile the GSettings schema
-
-The compiled schema ships in the repository (`schemas/gschemas.compiled`).
-If you need to recompile it after changes to the XML:
-
-```bash
+cp -r src/metadata.json src/extension.js src/prefs.js src/stylesheet.css src/scripts src/schemas "$DEST/"
 glib-compile-schemas "$DEST/schemas/"
-```
-
-### 3 – Make the helper scripts executable
-
-```bash
 chmod +x "$DEST/scripts/askpass.exp" "$DEST/scripts/askpin.exp"
 ```
 
-### 4 – Restart GNOME Shell (X11 only)
-
-On an **X11** session, GNOME Shell must be restarted before it can discover
-the newly installed extension:
-
-1. Press **Alt + F2** to open the *Run a Command* dialog.
-2. Type `r` and press **Enter**.
-
-GNOME Shell will reload without closing your open windows.
-
-> **Wayland note** – On a Wayland session `Alt + F2 → r` is not available.
-> Log out and log back in instead, or run the extension from a nested GNOME
-> session for testing:
-> ```bash
-> dbus-run-session -- gnome-shell --nested --wayland
-> ```
-
-### 5 – Enable the extension
+Enable:
 
 ```bash
 gnome-extensions enable gnome-openvpn-toggle@zeecka
 ```
 
-Or use **GNOME Extensions** app / **Extensions Manager**.
+On X11, reload GNOME Shell after install using `Alt+F2`, then `r`.
+On Wayland, log out and back in.
 
-### 6 – Configure sudoers (recommended)
+## Configure
 
-To avoid being prompted for a sudo password on every connection, add a
-sudoers rule for openvpn:
-
-```
-# /etc/sudoers.d/openvpn-toggle
-# Allow the current user to run openvpn as root without a password
-yourusername ALL=(root) NOPASSWD: /usr/sbin/openvpn
-```
-
-Create the file with:
-
-```bash
-sudo visudo -f /etc/sudoers.d/openvpn-toggle
-```
-
-If you keep sudo authentication active, a GNOME pinentry dialog will appear
-automatically to collect your password (handled by `askpass.exp`).
-
-### 7 – Add VPN profiles
-
-Place `.ovpn` files in `~/.config/openvpn/` (or the directory you configured
-in the preferences):
-
-```bash
-cp ~/Downloads/myvpn.ovpn ~/.config/openvpn/
-```
-
-Then click **⟳ Reload Profiles** in the panel menu (or simply re-open it).
-
----
-
-## Configuration
-
-Open the preferences dialog from the extension menu (⚙ Preferences) or via:
+Open preferences:
 
 ```bash
 gnome-extensions prefs gnome-openvpn-toggle@zeecka
 ```
 
-| Setting | Default | Description |
-|---|---|---|
-| **Profiles directory** | `~/.config/openvpn` | Directory scanned for `.ovpn` files |
-| **Interactive inputs** | GUI-managed | Per-VPN ordered prompt rules (`static` or `prompt`) |
-| **Debug logging** | `off` | Writes `.ovpn.log` files beside profiles with runtime traces/errors |
+Default profiles directory is `~/.config/openvpn`.
 
-### Interactive inputs (GUI only)
+## Troubleshooting (quick)
 
-Interactive inputs are configured only through the preferences GUI (no RAW JSON
-editor). For each profile, add ordered entries with:
+- Empty profile list: verify `.ovpn` files exist in your configured directory.
+- Toggle does nothing: ensure `expect` and `openvpn` are installed and in `PATH`.
+- No credential dialog: ensure `pinentry-gnome3` is installed.
+- Stuck on connecting: verify interactive input rules in preferences.
 
-- `input`: prompt text expected from OpenVPN output (matching is case-insensitive and whitespace-tolerant).
-- `type=static`: send `value` directly to OpenVPN.
-- `type=prompt`: open pinentry-gnome3 and use `value` as prompt label.
+For detailed troubleshooting and maintainer/development workflow, see:
 
-Rules are processed in order:
-
-1. `input`: literal text expected from OpenVPN prompt output.
-2. `type=static`: send `value` directly to OpenVPN.
-3. `type=prompt`: open pinentry-gnome3 and use `value` as prompt label.
-
-> Security note: `static` values are stored in clear text in GSettings.
-
----
-
-## How authentication works
-
-### Sudo password (`scripts/askpass.exp`)
-
-`askpass.exp` is set as the `SUDO_ASKPASS` environment variable before
-OpenVPN is started.  When `sudo -A` needs a password it calls this script
-(passing the prompt text as the first argument).  The script:
-
-1. Spawns `pinentry-gnome3`.
-2. Sends the prompt text via the Assuan protocol (`SETDESC`, `SETPROMPT`).
-3. Sends `GETPIN` and waits for the user to confirm.
-4. Receives the password on a `D <value>` line.
-5. Prints the password to stdout so sudo can use it.
-
-### Interactive auth flow (`scripts/askpin.exp`)
-
-`askpin.exp` is the main entry point called by the extension.  It:
-
-1. Receives the `.ovpn` file path as argument.
-2. Spawns `sudo -A openvpn --config …`.
-3. Loads per-profile interactive rules (if configured).
-4. Monitors OpenVPN stdout for expected prompt text using `expect`.
-5. For each matching rule, either sends static value or opens a
-  `pinentry-gnome3` dialog.
-6. Falls back to legacy PIN auto-detection when no custom rules are defined.
-7. Forwards all OpenVPN output to its own stdout so the GNOME extension can
-   detect `"Initialization Sequence Completed"`.
-
----
-
-## Directory layout
-
-```
-gnome-openvpn-toggle@zeecka/   ← install root
-├── metadata.json
-├── extension.js
-├── prefs.js
-├── stylesheet.css
-├── schemas/
-│   ├── org.gnome.shell.extensions.gnome-openvpn-toggle.gschema.xml
-│   └── gschemas.compiled          ← generated; do not edit by hand
-└── scripts/
-    ├── askpass.exp                ← SUDO_ASKPASS helper (pinentry for password)
-    └── askpin.exp                 ← OpenVPN wrapper (spawns openvpn, handles PIN)
-```
-
-VPN profiles live in a separate directory (default `~/.config/openvpn`):
-
-```
-~/.config/openvpn/
-├── work.ovpn
-├── home-lab.ovpn
-└── ...
-```
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause |
-|---|---|
-| Profile list empty | Profiles directory missing or no `.ovpn` files; check preferences |
-| Toggle has no effect | `expect` not installed; check with `which expect` |
-| No PIN dialog appears | `pinentry-gnome3` not installed; `DISPLAY` / `WAYLAND_DISPLAY` not set |
-| "Failed to start OpenVPN" | `openvpn` or `expect` not in `$PATH` |
-| IP address not shown | `ip` command not installed; IP display is silently skipped |
-| Custom prompts not handled | Missing/incorrect interactive entries or prompt text mismatch |
-| Stuck on Connecting… | A notification is shown after timeout; review prompt rules and OpenVPN logs |
-| Need detailed connection traces | Enable **Debug Logging** in preferences and inspect `<profile>.ovpn.log` |
-
-Enable GNOME Shell logs to see extension errors:
-
-```bash
-journalctl -f /usr/bin/gnome-shell
-```
-
----
+- [dev/README.md](dev/README.md)
 
 ## Uninstall
 
