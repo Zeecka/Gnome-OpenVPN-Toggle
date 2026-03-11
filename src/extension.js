@@ -883,7 +883,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
             if (!line)
                 continue;
 
-            let match = line.match(/^\d+:\s+([^\s]+)\s+inet\s+([0-9.]+)\/\d+/);
+            let match = line.match(/^\d+:\s+([^\s]+)\s+inet\s+([0-9.]+)(\/\d+)?/);
             if (!match)
                 continue;
 
