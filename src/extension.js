@@ -779,8 +779,20 @@ class OpenVpnIndicator extends PanelMenu.Button {
             let vpnRecords = records.filter(record => VPN_IFACE_REGEX.test(record.iface));
 
             this._connectBaselineVpnRecords = vpnRecords;
+
+            // Deduplicate by interface: keep only the first IP per interface so
+            // that a quick reconnect to the same VPN (which may assign the same
+            // two IPs again) still yields a diff on the second IP.
+            let seenIfaces = new Set();
             this._connectBaselineVpnRecordSet = new Set(
-                vpnRecords.map(record => `${record.iface}|${record.ip}`)
+                vpnRecords
+                    .filter(record => {
+                        if (seenIfaces.has(record.iface))
+                            return false;
+                        seenIfaces.add(record.iface);
+                        return true;
+                    })
+                    .map(record => `${record.iface}|${record.ip}`)
             );
 
             let baselineText = vpnRecords.length > 0
@@ -820,7 +832,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
                     let vpnRecords = records.filter(record => VPN_IFACE_REGEX.test(record.iface));
                     let currentRecord = vpnRecords.length > 0 ? vpnRecords[0] : null;
                     let diffRecord = this._findVpnDiffRecord(vpnRecords);
-                    let ip = (diffRecord ?? currentRecord)?.ip ?? null;
+                    let ip = currentRecord?.ip ?? null;
 
                     let diffText = diffRecord ? `${diffRecord.iface}:${diffRecord.ip}` : '(none)';
                     this._appendDebugLog(profile,
@@ -833,7 +845,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
                     } else if (diffRecord && allowPromoteFromConnecting && profile.state === VPN_STATE.CONNECTING) {
                         this._appendDebugLog(profile,
                             `[${new Date().toISOString()}] [extension] VPN iface/IP diff detected (${diffRecord.iface}:${diffRecord.ip}); promoting state to CONNECTED`);
-                        this._updateProfileState(profile, VPN_STATE.CONNECTED, diffRecord.ip);
+                        this._updateProfileState(profile, VPN_STATE.CONNECTED, ip);
                         this._startIpPoll(profile);
                         this._stopVpnReadyValidation();
                     }
