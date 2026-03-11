@@ -65,6 +65,9 @@ const VPN_STATE = {
     CONNECTED    : 'connected',
 };
 
+const PANEL_ICON_CONNECTED = 'network-vpn-symbolic';
+const PANEL_ICON_DISCONNECTED = 'network-vpn-disconnected-symbolic';
+
 /** Regex matching common VPN interface prefixes */
 const VPN_IFACE_REGEX = /^(tun|tap|wg|ppp)/;
 
@@ -77,6 +80,8 @@ const CONNECT_TIMEOUT_MS = 120000;
 const VPN_READY_TIMEOUT_MS = 20000;
 /** Poll interval (ms) while waiting for VPN interface/IP after init-complete */
 const VPN_READY_POLL_INTERVAL_MS = 1000;
+/** Delay (ms) before reconnecting after an unexpected disconnect */
+const RECONNECT_DELAY_MS = 5000;
 
 const INTERACTIVE_SECRET_SCHEMA = new Secret.Schema(
     'org.gnome.shell.extensions.gnome-openvpn-toggle.interactive-input',
@@ -252,16 +257,19 @@ class OpenVpnIndicator extends PanelMenu.Button {
         this._lastAskpinError   = null;
         /** Current profile debug log path (.ovpn.log), or null */
         this._activeDebugLogPath = null;
+        /** Temporary cache file path for sudo password reuse on auto-reconnect */
+        this._sudoCacheFilePath = null;
         /** Baseline VPN iface/IP records captured before connecting */
         this._connectBaselineVpnRecords = [];
         /** Fast lookup set for baseline VPN iface/IP tuples */
         this._connectBaselineVpnRecordSet = new Set();
 
         // ── Panel icon ────────────────────────────────────────────────────
-        this.add_child(new St.Icon({
-            icon_name  : 'network-vpn-symbolic',
+        this._panelIcon = new St.Icon({
+            icon_name  : PANEL_ICON_DISCONNECTED,
             style_class: 'system-status-icon',
-        }));
+        });
+        this.add_child(this._panelIcon);
 
         // ── Menu layout ───────────────────────────────────────────────────
         this.menu.addMenuItem(new PopupMenu.PopupMenuItem('OpenVPN Profiles', {
@@ -350,6 +358,9 @@ class OpenVpnIndicator extends PanelMenu.Button {
                 state    : existing ? existing.state    : VPN_STATE.DISCONNECTED,
                 ipAddress: existing ? existing.ipAddress : null,
                 debugLogPath: existing ? existing.debugLogPath : null,
+                desiredEnabled: existing ? existing.desiredEnabled === true : false,
+                reconnectTimer: existing ? existing.reconnectTimer ?? null : null,
+                promptCacheFilePath: existing ? existing.promptCacheFilePath ?? null : null,
                 needsConfig: !this._hasInteractiveConfigForProfile(f),
             };
             this._profiles.set(f.name, profile);
@@ -363,6 +374,8 @@ class OpenVpnIndicator extends PanelMenu.Button {
             this._menuItems.set(f.name, item);
             this._profileSection.addMenuItem(item);
         }
+
+        this._refreshPanelIcon();
     }
 
     /** Show a placeholder row when there are no profiles to display */
@@ -371,6 +384,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
         this._menuItems.clear();
         this._profileSection.addMenuItem(
             new PopupMenu.PopupMenuItem(msg, { reactive: false }));
+        this._refreshPanelIcon();
     }
 
     // ── Toggle handling ──────────────────────────────────────────────────────
@@ -386,6 +400,9 @@ class OpenVpnIndicator extends PanelMenu.Button {
      */
     _handleToggle(profile, enabled) {
         if (enabled) {
+            profile.desiredEnabled = true;
+            this._cancelReconnect(profile);
+
             // Disconnect the currently active profile if it is different
             if (this._activeProfileName &&
                 this._activeProfileName !== profile.name) {
@@ -413,7 +430,17 @@ class OpenVpnIndicator extends PanelMenu.Button {
      *
      * @param {object} profile - Profile to connect
      */
-    _connectVpn(profile) {
+    _connectVpn(profile, options = {}) {
+        if (!profile)
+            return;
+
+        let isReconnect = options.isReconnect === true;
+
+        this._cancelReconnect(profile);
+
+        if (this._activeProfileName === profile.name && this._activeProcess)
+            return;
+
         this._captureConnectBaseline(profile);
         this._updateProfileState(profile, VPN_STATE.CONNECTING, null);
 
@@ -442,6 +469,17 @@ class OpenVpnIndicator extends PanelMenu.Button {
 
         // SUDO_ASKPASS: sudo will call this script when it needs a password
         launcher.setenv('SUDO_ASKPASS', askpass, true);
+
+        if (isReconnect)
+            launcher.setenv('OPENVPN_TOGGLE_AUTO_RECONNECT', '1', true);
+
+        let sudoCacheFile = this._ensureSudoCacheFile();
+        if (sudoCacheFile)
+            launcher.setenv('OPENVPN_TOGGLE_SUDO_CACHE_FILE', sudoCacheFile, true);
+
+        let promptCacheFile = this._ensurePromptCacheFile(profile);
+        if (promptCacheFile)
+            launcher.setenv('OPENVPN_TOGGLE_PROMPT_CACHE_FILE', promptCacheFile, true);
 
         // Propagate display variables so pinentry-gnome3 can open a window
         for (let v of ['DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR',
@@ -475,6 +513,8 @@ class OpenVpnIndicator extends PanelMenu.Button {
                 `[${new Date().toISOString()}] [extension] askpin script=${askpin} askpass script=${askpass}`);
             this._appendDebugLog(profile,
                 `[${new Date().toISOString()}] [extension] interactive rules file=${rulesFile ?? '(none)'}`);
+            this._appendDebugLog(profile,
+                `[${new Date().toISOString()}] [extension] connect mode=${isReconnect ? 'auto-reconnect' : 'manual'} sudo-cache=${sudoCacheFile ?? '(none)'} prompt-cache=${promptCacheFile ?? '(none)'}`);
 
             this._startConnectTimeout(profile);
 
@@ -499,6 +539,11 @@ class OpenVpnIndicator extends PanelMenu.Button {
      */
     _disconnectVpn(profile) {
         if (!profile) return;
+
+        profile.desiredEnabled = false;
+        this._cancelReconnect(profile);
+        this._clearPromptCache(profile);
+        this._clearSudoCache();
 
         this._stopIpPoll();
         this._stopConnectTimeout();
@@ -633,7 +678,8 @@ class OpenVpnIndicator extends PanelMenu.Button {
      * Idempotent: the DISCONNECTED guard makes the second call a no-op.
      */
     _onProcessExit(profile) {
-        if (profile.state === VPN_STATE.DISCONNECTED) return; // already handled
+        let previousState = profile.state;
+        if (previousState === VPN_STATE.DISCONNECTED) return; // already handled
 
         this._stopIpPoll();
         this._stopConnectTimeout();
@@ -646,6 +692,11 @@ class OpenVpnIndicator extends PanelMenu.Button {
             this._cleanupRulesFile();
             this._activeDebugLogPath = null;
             this._clearConnectBaseline();
+        }
+
+        if (previousState === VPN_STATE.CONNECTED &&
+            profile.desiredEnabled === true) {
+            this._scheduleReconnect(profile);
         }
     }
 
@@ -845,6 +896,7 @@ class OpenVpnIndicator extends PanelMenu.Button {
                     } else if (diffRecord && allowPromoteFromConnecting && profile.state === VPN_STATE.CONNECTING) {
                         this._appendDebugLog(profile,
                             `[${new Date().toISOString()}] [extension] VPN iface/IP diff detected (${diffRecord.iface}:${diffRecord.ip}); promoting state to CONNECTED`);
+                        profile.desiredEnabled = true;
                         this._updateProfileState(profile, VPN_STATE.CONNECTED, ip);
                         this._startIpPoll(profile);
                         this._stopVpnReadyValidation();
@@ -1084,6 +1136,99 @@ class OpenVpnIndicator extends PanelMenu.Button {
         this._activeRulesFile = null;
     }
 
+    _scheduleReconnect(profile) {
+        if (!profile || profile.desiredEnabled !== true)
+            return;
+
+        this._cancelReconnect(profile);
+
+        this._appendDebugLog(profile,
+            `[${new Date().toISOString()}] [extension] Unexpected disconnect detected; reconnect scheduled in ${RECONNECT_DELAY_MS}ms`);
+
+        profile.reconnectTimer = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT,
+            RECONNECT_DELAY_MS,
+            () => {
+                profile.reconnectTimer = null;
+
+                if (profile.desiredEnabled !== true)
+                    return GLib.SOURCE_REMOVE;
+
+                if (this._activeProcess || this._activeProfileName)
+                    return GLib.SOURCE_REMOVE;
+
+                this._appendDebugLog(profile,
+                    `[${new Date().toISOString()}] [extension] Reconnecting after unexpected disconnect`);
+                this._connectVpn(profile, {isReconnect: true});
+                return GLib.SOURCE_REMOVE;
+            });
+    }
+
+    _cancelReconnect(profile) {
+        if (!profile || profile.reconnectTimer === null || profile.reconnectTimer === undefined)
+            return;
+
+        GLib.source_remove(profile.reconnectTimer);
+        profile.reconnectTimer = null;
+    }
+
+    _ensureTempFile(prefix) {
+        try {
+            let [fd, path] = GLib.file_open_tmp(prefix);
+            try { GLib.close(fd); } catch (_e) { /* ignore */ }
+            return path;
+        } catch (e) {
+            console.error('[OpenVPN Toggle] Failed creating temp file', e);
+            return null;
+        }
+    }
+
+    _ensureSudoCacheFile() {
+        if (this._sudoCacheFilePath)
+            return this._sudoCacheFilePath;
+
+        this._sudoCacheFilePath = this._ensureTempFile('openvpn-toggle-sudo-cache-XXXXXX');
+        return this._sudoCacheFilePath;
+    }
+
+    _clearSudoCache() {
+        if (!this._sudoCacheFilePath)
+            return;
+
+        try {
+            GLib.unlink(this._sudoCacheFilePath);
+        } catch (_e) {
+            /* ignore cleanup failures */
+        }
+
+        this._sudoCacheFilePath = null;
+    }
+
+    _ensurePromptCacheFile(profile) {
+        if (!profile)
+            return null;
+
+        if (profile.promptCacheFilePath)
+            return profile.promptCacheFilePath;
+
+        profile.promptCacheFilePath = this._ensureTempFile(
+            `openvpn-toggle-prompt-cache-${profile.name}-XXXXXX`);
+        return profile.promptCacheFilePath;
+    }
+
+    _clearPromptCache(profile) {
+        if (!profile || !profile.promptCacheFilePath)
+            return;
+
+        try {
+            GLib.unlink(profile.promptCacheFilePath);
+        } catch (_e) {
+            /* ignore cleanup failures */
+        }
+
+        profile.promptCacheFilePath = null;
+    }
+
     /** Expand a leading ~ to the user's home directory */
     _expandPath(p) {
         if (p.startsWith('~'))
@@ -1097,6 +1242,24 @@ class OpenVpnIndicator extends PanelMenu.Button {
         profile.ipAddress = ipAddress;
         let item = this._menuItems.get(profile.name);
         if (item) item.updateState(state, ipAddress);
+        this._refreshPanelIcon();
+    }
+
+    _refreshPanelIcon() {
+        if (!this._panelIcon)
+            return;
+
+        let anyConnected = false;
+        for (let profile of this._profiles.values()) {
+            if (profile.state === VPN_STATE.CONNECTED) {
+                anyConnected = true;
+                break;
+            }
+        }
+
+        this._panelIcon.icon_name = anyConnected
+            ? PANEL_ICON_CONNECTED
+            : PANEL_ICON_DISCONNECTED;
     }
 
     // ── Cleanup ──────────────────────────────────────────────────────────────
@@ -1105,6 +1268,14 @@ class OpenVpnIndicator extends PanelMenu.Button {
     destroy() {
         this._stopIpPoll();
         this._stopConnectTimeout();
+
+        for (let profile of this._profiles.values()) {
+            profile.desiredEnabled = false;
+            this._cancelReconnect(profile);
+            this._clearPromptCache(profile);
+        }
+
+        this._clearSudoCache();
 
         if (this._cancellable) {
             this._cancellable.cancel();

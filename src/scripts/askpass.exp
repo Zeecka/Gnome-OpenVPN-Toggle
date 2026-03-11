@@ -32,6 +32,47 @@ if {$prompt eq ""} {
     set prompt "Enter sudo password:"
 }
 
+set auto_reconnect [expr {[info exists env(OPENVPN_TOGGLE_AUTO_RECONNECT)] && $env(OPENVPN_TOGGLE_AUTO_RECONNECT) eq "1"}]
+set sudo_cache_file [expr {[info exists env(OPENVPN_TOGGLE_SUDO_CACHE_FILE)] ? $env(OPENVPN_TOGGLE_SUDO_CACHE_FILE) : ""}]
+
+proc read_cached_secret {path} {
+    if {$path eq "" || ![file exists $path]} {
+        return ""
+    }
+
+    if {[catch {
+        set fh [open $path r]
+        fconfigure $fh -translation binary -encoding binary
+        set data [read $fh]
+        close $fh
+    }]} {
+        return ""
+    }
+
+    return $data
+}
+
+proc write_cached_secret {path value} {
+    if {$path eq ""} {
+        return
+    }
+
+    catch {
+        set fh [open $path w 0600]
+        fconfigure $fh -translation binary -encoding binary
+        puts -nonewline $fh $value
+        close $fh
+    }
+}
+
+if {$auto_reconnect} {
+    set cached_password [read_cached_secret $sudo_cache_file]
+    if {$cached_password ne ""} {
+        puts -nonewline $cached_password
+        exit 0
+    }
+}
+
 # Escape special characters that have meaning in the Assuan protocol
 set prompt [string map {% %25 \n " "} $prompt]
 
@@ -74,6 +115,7 @@ expect {
         expect "OK"
         send "BYE\r"
         expect eof
+        write_cached_secret $sudo_cache_file $password
         # Print the password to stdout so sudo can consume it
         puts -nonewline $password
         exit 0

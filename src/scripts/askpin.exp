@@ -3,6 +3,8 @@
 set ovpn_file [lindex $argv 0]
 set rules_file [lindex $argv 1]
 set debug_log [lindex $argv 2]
+set auto_reconnect [expr {[info exists env(OPENVPN_TOGGLE_AUTO_RECONNECT)] && $env(OPENVPN_TOGGLE_AUTO_RECONNECT) eq "1"}]
+set prompt_cache_file [expr {[info exists env(OPENVPN_TOGGLE_PROMPT_CACHE_FILE)] ? $env(OPENVPN_TOGGLE_PROMPT_CACHE_FILE) : ""}]
 
 if {$ovpn_file eq ""} {
     puts stderr "Usage: askpin.exp <ovpn_file> ?rules_file? ?debug_log?"
@@ -27,6 +29,10 @@ if {$debug_log ne ""} {
 
 proc unescape_rule_field {value} {
     return [string map [list "\\\\t" "\t" "\\\\n" "\n" "\\\\r" "\r" "\\\\" "\\"] $value]
+}
+
+proc escape_rule_field {value} {
+    return [string map [list "\\" "\\\\" "\t" "\\t" "\n" "\\n" "\r" "\\r"] $value]
 }
 
 proc load_rules {path} {
@@ -65,6 +71,65 @@ proc load_rules {path} {
     }
 
     return $rules
+}
+
+proc load_prompt_cache {path} {
+    if {$path eq "" || ![file exists $path]} {
+        return {}
+    }
+
+    if {[catch {
+        set fh [open $path r]
+        set content [read $fh]
+        close $fh
+    }]} {
+        return {}
+    }
+
+    set cache_entries {}
+    foreach line [split $content "\n"] {
+        if {$line eq ""} {
+            continue
+        }
+
+        set fields [split $line "\t"]
+        if {[llength $fields] != 2} {
+            continue
+        }
+
+        set expected [unescape_rule_field [lindex $fields 0]]
+        set value [unescape_rule_field [lindex $fields 1]]
+        if {$expected eq ""} {
+            continue
+        }
+
+        lappend cache_entries $expected $value
+    }
+
+    return $cache_entries
+}
+
+proc store_prompt_cache_entry {path expected value} {
+    if {$path eq "" || $expected eq ""} {
+        return
+    }
+
+    array set cache_map [load_prompt_cache $path]
+    set cache_map($expected) $value
+
+    set rows {}
+    foreach key [lsort [array names cache_map]] {
+        lappend rows "[escape_rule_field $key]\t[escape_rule_field $cache_map($key)]"
+    }
+
+    catch {
+        set fh [open $path w 0600]
+        puts -nonewline $fh [join $rows "\n"]
+        if {[llength $rows] > 0} {
+            puts -nonewline $fh "\n"
+        }
+        close $fh
+    }
 }
 
 proc literal_to_regex {text} {
@@ -246,11 +311,15 @@ set input_rules [load_rules $rules_file]
 set use_rules [expr {[llength $input_rules] > 0}]
 set current_rule_index 0
 set current_expected_re "__NO_MATCH__"
+array set prompt_cache [load_prompt_cache $prompt_cache_file]
 
 if {$use_rules} {
     set first_rule [lindex $input_rules 0]
     set current_expected_re [literal_to_regex [lindex $first_rule 0]]
     puts "askpin: loaded [llength $input_rules] configured input rule(s)"
+    if {$auto_reconnect} {
+        puts "askpin: automatic reconnect enabled; cached prompt answers will be reused when available"
+    }
     puts "askpin: waiting for input #1 regex={$current_expected_re}"
     flush stdout
 } else {
@@ -288,12 +357,23 @@ expect {
             flush stdout
             set response $input_value
         } else {
-            puts "askpin: matched input #[expr {$current_rule_index + 1}] type=prompt expected={$expected_text}"
-            flush stdout
+            if {$auto_reconnect && [info exists prompt_cache($expected_text)] && $prompt_cache($expected_text) ne ""} {
+                puts "askpin: matched input #[expr {$current_rule_index + 1}] type=prompt expected={$expected_text} using cached response"
+                flush stdout
+                set response $prompt_cache($expected_text)
+            } else {
+                puts "askpin: matched input #[expr {$current_rule_index + 1}] type=prompt expected={$expected_text}"
+                flush stdout
 
-            set response [request_value \
-                "OpenVPN requires an input.\n$observed" \
-                $input_value]
+                set response [request_value \
+                    "OpenVPN requires an input.\n$observed" \
+                    $input_value]
+
+                if {$response ne ""} {
+                    set prompt_cache($expected_text) $response
+                    store_prompt_cache_entry $prompt_cache_file $expected_text $response
+                }
+            }
 
             if {$response eq ""} {
                 puts stderr "askpin: prompt input cancelled/unavailable for expected text: $expected_text"
