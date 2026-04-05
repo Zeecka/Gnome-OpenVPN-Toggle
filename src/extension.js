@@ -82,6 +82,8 @@ const VPN_READY_TIMEOUT_MS = 20000;
 const VPN_READY_POLL_INTERVAL_MS = 1000;
 /** Delay (ms) before reconnecting after an unexpected disconnect */
 const RECONNECT_DELAY_MS = 5000;
+/** Delay (ms) before reconnecting after the system wakes from sleep */
+const RECONNECT_AFTER_SLEEP_DELAY_MS = 10000;
 
 const INTERACTIVE_SECRET_SCHEMA = new Secret.Schema(
     'org.gnome.shell.extensions.gnome-openvpn-toggle.interactive-input',
@@ -263,6 +265,8 @@ class OpenVpnIndicator extends PanelMenu.Button {
         this._connectBaselineVpnRecords = [];
         /** Fast lookup set for baseline VPN iface/IP tuples */
         this._connectBaselineVpnRecordSet = new Set();
+        /** D-Bus signal subscription ID for PrepareForSleep, or null */
+        this._sleepSignalId = null;
 
         // ── Panel icon ────────────────────────────────────────────────────
         this._panelIcon = new St.Icon({
@@ -296,6 +300,23 @@ class OpenVpnIndicator extends PanelMenu.Button {
         this.menu.connect('open-state-changed', (_menu, isOpen) => {
             if (isOpen) this._loadProfiles();
         });
+
+        // ── Sleep/wake monitoring ─────────────────────────────────────────
+        // Subscribe to the systemd-logind PrepareForSleep signal so that VPN
+        // profiles marked as desired-enabled are automatically reconnected
+        // after the system resumes from suspend/hibernate.
+        this._sleepSignalId = Gio.DBus.system.signal_subscribe(
+            'org.freedesktop.login1',
+            'org.freedesktop.login1.Manager',
+            'PrepareForSleep',
+            '/org/freedesktop/login1',
+            null,
+            Gio.DBusSignalFlags.NONE,
+            (_conn, _sender, _path, _iface, _signal, parameters) => {
+                let [preparing] = parameters.deepUnpack();
+                this._onPrepareForSleep(preparing);
+            }
+        );
     }
 
     // ── Profile loading ──────────────────────────────────────────────────────
@@ -1172,6 +1193,71 @@ class OpenVpnIndicator extends PanelMenu.Button {
         profile.reconnectTimer = null;
     }
 
+    /**
+     * Called when the system is about to suspend (preparing = true) or has
+     * just resumed from suspend/hibernate (preparing = false).
+     *
+     * On resume, any VPN profile that the user had turned on (desiredEnabled)
+     * is reconnected after a short delay so the network stack has time to
+     * re-initialize.  Any stale process left over from before the sleep is
+     * torn down first.
+     *
+     * @param {boolean} preparing - true = going to sleep, false = waking up
+     */
+    _onPrepareForSleep(preparing) {
+        if (preparing)
+            return;
+
+        // System is waking up from sleep/suspend.
+        for (let profile of this._profiles.values()) {
+            if (profile.desiredEnabled !== true)
+                continue;
+
+            this._cancelReconnect(profile);
+
+            profile.reconnectTimer = GLib.timeout_add(
+                GLib.PRIORITY_DEFAULT,
+                RECONNECT_AFTER_SLEEP_DELAY_MS,
+                () => {
+                    profile.reconnectTimer = null;
+
+                    if (profile.desiredEnabled !== true)
+                        return GLib.SOURCE_REMOVE;
+
+                    // Tear down any stale process that survived the sleep cycle
+                    // before attempting a fresh connection.
+                    if (this._activeProfileName === profile.name) {
+                        this._stopIpPoll();
+                        this._stopConnectTimeout();
+                        this._stopVpnReadyValidation();
+                        this._clearConnectBaseline();
+
+                        if (this._cancellable) {
+                            this._cancellable.cancel();
+                            this._cancellable = null;
+                        }
+
+                        if (this._activeProcess) {
+                            try {
+                                this._activeProcess.send_signal(15);
+                            } catch (_e) { /* already gone */ }
+                            this._activeProcess = null;
+                        }
+
+                        this._cleanupRulesFile();
+                        this._activeProfileName = null;
+                        this._activeDebugLogPath = null;
+                    }
+
+                    this._updateProfileState(profile, VPN_STATE.DISCONNECTED, null);
+                    this._appendDebugLog(profile,
+                        `[${new Date().toISOString()}] [extension] Reconnecting after system resume`);
+                    this._connectVpn(profile, {isReconnect: true});
+                    return GLib.SOURCE_REMOVE;
+                });
+        }
+    }
+
     _ensureTempFile(prefix) {
         try {
             let [fd, path] = GLib.file_open_tmp(prefix);
@@ -1268,6 +1354,11 @@ class OpenVpnIndicator extends PanelMenu.Button {
     destroy() {
         this._stopIpPoll();
         this._stopConnectTimeout();
+
+        if (this._sleepSignalId !== null) {
+            Gio.DBus.system.signal_unsubscribe(this._sleepSignalId);
+            this._sleepSignalId = null;
+        }
 
         for (let profile of this._profiles.values()) {
             profile.desiredEnabled = false;
