@@ -1,7 +1,7 @@
 # Developer Documentation
 
 This document covers local development, packaging, and release workflow for
-`gnome-openvpn-toggle@zeecka`.
+`gnome-openvpn-toggle@ovpntoggle`.
 
 ## Prerequisites
 
