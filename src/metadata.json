@@ -1,5 +1,5 @@
 {
-    "uuid": "gnome-openvpn-toggle@zeecka",
+    "uuid": "gnome-openvpn-toggle@ovpntoggle",
     "name": "OpenVPN Toggle",
     "description": "Toggle multiple OpenVPN profiles directly from the GNOME top panel. Manages OpenVPN CLI processes without NetworkManager.",
     "version": 1,

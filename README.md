@@ -33,17 +33,17 @@ Download the latest zip from the [Releases page](https://github.com/Zeecka/Gnome
 and install it with one command:
 
 ```bash
-gnome-extensions install gnome-openvpn-toggle@zeecka-v<VERSION>.zip --force
-gnome-extensions enable gnome-openvpn-toggle@zeecka
+gnome-extensions install gnome-openvpn-toggle@ovpntoggle-v<VERSION>.zip --force
+gnome-extensions enable gnome-openvpn-toggle@ovpntoggle
 ```
 
 Or, using `curl` to grab the latest release automatically:
 
 ```bash
 TAG=$(curl -s https://api.github.com/repos/Zeecka/Gnome-OpenVPN-Toggle/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-curl -L "https://github.com/Zeecka/Gnome-OpenVPN-Toggle/releases/download/${TAG}/gnome-openvpn-toggle@zeecka-${TAG}.zip" -o gnome-openvpn-toggle.zip
+curl -L "https://github.com/Zeecka/Gnome-OpenVPN-Toggle/releases/download/${TAG}/gnome-openvpn-toggle@ovpntoggle-${TAG}.zip" -o gnome-openvpn-toggle.zip
 gnome-extensions install gnome-openvpn-toggle.zip --force
-gnome-extensions enable gnome-openvpn-toggle@zeecka
+gnome-extensions enable gnome-openvpn-toggle@ovpntoggle
 ```
 
 On X11, reload GNOME Shell after install using `Alt+F2`, then `r`.
@@ -55,7 +55,7 @@ On Wayland, log out and back in.
 git clone https://github.com/Zeecka/Gnome-OpenVPN-Toggle.git
 cd Gnome-OpenVPN-Toggle
 
-DEST="$HOME/.local/share/gnome-shell/extensions/gnome-openvpn-toggle@zeecka"
+DEST="$HOME/.local/share/gnome-shell/extensions/gnome-openvpn-toggle@ovpntoggle"
 mkdir -p "$DEST"
 cp -r src/metadata.json src/extension.js src/prefs.js src/stylesheet.css src/scripts src/schemas "$DEST/"
 glib-compile-schemas "$DEST/schemas/"
@@ -65,7 +65,7 @@ chmod +x "$DEST/scripts/askpass.exp" "$DEST/scripts/askpin.exp"
 Enable:
 
 ```bash
-gnome-extensions enable gnome-openvpn-toggle@zeecka
+gnome-extensions enable gnome-openvpn-toggle@ovpntoggle
 ```
 
 On X11, reload GNOME Shell after install using `Alt+F2`, then `r`.
@@ -76,7 +76,7 @@ On Wayland, log out and back in.
 Open preferences:
 
 ```bash
-gnome-extensions prefs gnome-openvpn-toggle@zeecka
+gnome-extensions prefs gnome-openvpn-toggle@ovpntoggle
 ```
 
 Default profiles directory is `~/.config/openvpn`.
@@ -95,6 +95,6 @@ For detailed troubleshooting and maintainer/development workflow, see:
 ## Uninstall
 
 ```bash
-gnome-extensions disable gnome-openvpn-toggle@zeecka
-rm -rf "$HOME/.local/share/gnome-shell/extensions/gnome-openvpn-toggle@zeecka"
+gnome-extensions disable gnome-openvpn-toggle@ovpntoggle
+rm -rf "$HOME/.local/share/gnome-shell/extensions/gnome-openvpn-toggle@ovpntoggle"
 ```

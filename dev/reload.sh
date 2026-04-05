@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SRC_DIR="$REPO_ROOT/src"
 
-UUID="gnome-openvpn-toggle@zeecka"
+UUID="gnome-openvpn-toggle@ovpntoggle"
 SCHEMA_ID="org.gnome.shell.extensions.gnome-openvpn-toggle"
 DCONF_PATH="/org/gnome/shell/extensions/gnome-openvpn-toggle/"
 
