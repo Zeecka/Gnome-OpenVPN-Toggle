@@ -27,6 +27,28 @@ Fedora/RHEL:
 sudo dnf install openvpn expect pinentry-gnome3 iproute
 ```
 
+## Install from release (recommended)
+
+Download the latest zip from the [Releases page](https://github.com/Zeecka/Gnome-OpenVPN-Toggle/releases/latest)
+and install it with one command:
+
+```bash
+gnome-extensions install gnome-openvpn-toggle@zeecka-v<VERSION>.zip --force
+gnome-extensions enable gnome-openvpn-toggle@zeecka
+```
+
+Or, using `curl` to grab the latest release automatically:
+
+```bash
+TAG=$(curl -s https://api.github.com/repos/Zeecka/Gnome-OpenVPN-Toggle/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+curl -L "https://github.com/Zeecka/Gnome-OpenVPN-Toggle/releases/download/${TAG}/gnome-openvpn-toggle@zeecka-${TAG}.zip" -o gnome-openvpn-toggle.zip
+gnome-extensions install gnome-openvpn-toggle.zip --force
+gnome-extensions enable gnome-openvpn-toggle@zeecka
+```
+
+On X11, reload GNOME Shell after install using `Alt+F2`, then `r`.
+On Wayland, log out and back in.
+
 ## Install (manual)
 
 ```bash

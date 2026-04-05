@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get install -y libglib2.0-bin zip
+
+      - name: Build extension zip
+        run: |
+          UUID=$(python3 -c 'import json; print(json.load(open("src/metadata.json"))["uuid"])')
+          TAG="${GITHUB_REF_NAME}"
+          STAGE=".build/ext"
+
+          mkdir -p dist "$STAGE"
+
+          cp src/metadata.json src/extension.js src/prefs.js src/stylesheet.css "$STAGE/"
+          cp -r src/scripts src/schemas "$STAGE/"
+
+          chmod +x "$STAGE/scripts/askpass.exp" "$STAGE/scripts/askpin.exp"
+          glib-compile-schemas "$STAGE/schemas/"
+
+          (cd "$STAGE" && zip -r "../../dist/${UUID}-${TAG}.zip" .)
+          echo "ZIP=dist/${UUID}-${TAG}.zip" >> "$GITHUB_ENV"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP }}
+          generate_release_notes: true
