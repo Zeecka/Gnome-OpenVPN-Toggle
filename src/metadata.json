@@ -2,7 +2,7 @@
     "uuid": "gnome-openvpn-toggle@ovpntoggle",
     "name": "OpenVPN Toggle",
     "description": "Toggle multiple OpenVPN profiles directly from the GNOME top panel. Manages OpenVPN CLI processes without NetworkManager.",
-    "version": 1,
+    "version": "1.1.0",
     "shell-version": ["42", "43", "44", "45", "46"],
     "url": "https://github.com/Zeecka/Gnome-OpenVPN-Toggle",
     "settings-schema": "org.gnome.shell.extensions.gnome-openvpn-toggle"
