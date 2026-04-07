@@ -34,6 +34,7 @@ and install it with one command:
 
 ```bash
 gnome-extensions install gnome-openvpn-toggle@ovpntoggle-v<VERSION>.zip --force
+# On X11: press Alt+F2, type 'r', then Enter to reload GNOME Shell
 gnome-extensions enable gnome-openvpn-toggle@ovpntoggle
 ```
 
@@ -43,6 +44,7 @@ Or, using `curl` to grab the latest release automatically:
 TAG=$(curl -s https://api.github.com/repos/Zeecka/Gnome-OpenVPN-Toggle/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
 curl -L "https://github.com/Zeecka/Gnome-OpenVPN-Toggle/releases/download/${TAG}/gnome-openvpn-toggle@ovpntoggle-${TAG}.zip" -o gnome-openvpn-toggle.zip
 gnome-extensions install gnome-openvpn-toggle.zip --force
+# On X11: press Alt+F2, type 'r', then Enter to reload GNOME Shell
 gnome-extensions enable gnome-openvpn-toggle@ovpntoggle
 ```
 
